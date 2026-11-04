@@ -119,7 +119,7 @@ describe('request(): no side effect, a §3.3 record on disk', () => {
 
   test('an invalid kind or a blank serverId is refused', async () => {
     const store = queue()
-    await assert.rejects(store.request({ kind: 'nuke', serverId: 'srv-01' }), /kind/)
+    await assert.rejects(store.request({ kind: 'nuke' as never, serverId: 'srv-01' }), /kind/)
     await assert.rejects(store.request({ kind: 'delete-server', serverId: '  ' }), /serverId/)
   })
 

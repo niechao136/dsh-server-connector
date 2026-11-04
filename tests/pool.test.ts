@@ -292,7 +292,9 @@ describe('path helpers and defaults (§7.2, §7.3, §10)', () => {
     assert.equal(without.includes('cd '), false)
     const withCwd = buildRemoteScript('pwd', 1000, "/srv/a b's")
     assert.ok(withCwd.startsWith("cd '/srv/a b'\\''s' && {"))
-    assert.ok(without.startsWith('setsid sh -c'))
+    // The HUP trap is part of the body, so the watchdog proper starts on the
+    // line after it (see the trap's docstring for why it exists).
+    assert.match(without, /^trap 'kill -KILL -\$child 2>\/dev\/null; kill \$watchdog 2>\/dev\/null; exit 129' HUP TERM INT\nsetsid sh -c /)
   })
 })
 
