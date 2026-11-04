@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Server Connector",
+    "description": "Configure the SSH servers this machine can operate: a connection pool, a high-risk command policy, an audit log, and two-step dangerous operations."
+  }
+}
