@@ -28,10 +28,12 @@ The "before" build is the `master` commit `8400d9c` (the merge of phase 4),
 checked out as a separate worktree and linked into its own profile. The "after"
 build is this branch.
 
-The seeded servers used for the panel, detail and form captures are identical in
-both revisions (`生产机-A` / `10.0.0.5:22` and `测试机-B` / `10.0.0.6:22`, key and
-agent authentication, `/srv/app` working directory). The settings capture shows a
-deletion request queued for `生产机-A`, which is the §8.3 two-step flow.
+The baseline has no panel to seed, so the two seeded servers (`生产机-A` /
+`10.0.0.5:22` and `测试机-B` / `10.0.0.6:22`, key and agent authentication,
+`/srv/app` working directory) exist only in the "after" captures, where they are
+created through the plugin's own `POST /server-connector/servers` route — the
+same route the form calls. The settings capture shows a deletion request queued
+for `生产机-A`, which is the §8.3 two-step flow.
 
 ## What the captures do not prove
 
