@@ -9,6 +9,8 @@
     "./policy": "./lib/policy.js",
     "./registry": "./lib/registry.js",
     "./audit": "./lib/audit.js",
+    "./known-hosts": "./lib/known-hosts.js",
+    "./pool": "./lib/pool.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -31,10 +33,13 @@
     "test:policy": "node --test tests/policy.test.ts",
     "test:registry": "node --test tests/registry.test.ts",
     "test:audit": "node --test tests/audit.test.ts",
+    "test:known-hosts": "node --test tests/known-hosts.test.ts",
+    "test:pool": "node --test tests/pool.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.5"
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "ssh2": "^1.17.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5",
@@ -61,7 +66,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@types/ssh2": "^1.15.6"
   },
   "keywords": [
     "dsh",

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
 
-import { Config, buildAuditLog, buildRegistry } from '../lib/index.js'
+import { Config, buildAuditLog, buildKnownHosts, buildPool, buildRegistry } from '../lib/index.js'
 
 let directory: string
 
@@ -72,5 +72,30 @@ describe('config → unit wiring', () => {
   test('buildRegistry() honours an explicit file override', () => {
     const file = join(directory, 'custom.json')
     assert.equal(buildRegistry(undefined, { file }).file, file)
+  })
+
+  test('buildKnownHosts() uses $DSH_HOME/server-connector/known_hosts.json', () => {
+    const store = buildKnownHosts(undefined, { env: { DSH_HOME: directory } })
+    assert.equal(store.file, join(directory, 'server-connector', 'known_hosts.json'))
+  })
+
+  test('buildKnownHosts() honours an explicit file override', () => {
+    const file = join(directory, 'custom-known-hosts.json')
+    assert.equal(buildKnownHosts(undefined, { file }).file, file)
+  })
+
+  test('buildPool() forwards the §10 timeouts and the output ceiling', () => {
+    const pool = buildPool(
+      new Config({ idleTimeoutMs: 1234, commandTimeoutMs: 5678, connectTimeoutMs: 4321, maxOutputChars: 9000 }),
+      { knownHosts: buildKnownHosts(undefined, { file: join(directory, 'known_hosts.json') }) },
+    )
+    assert.equal(pool.idleTimeoutMs, 1234)
+  })
+
+  test('buildPool() falls back to the documented defaults for an empty config', () => {
+    const pool = buildPool(new Config({}), {
+      knownHosts: buildKnownHosts(undefined, { file: join(directory, 'known_hosts.json') }),
+    })
+    assert.equal(pool.idleTimeoutMs, 600000)
   })
 })
