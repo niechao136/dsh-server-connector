@@ -95,6 +95,12 @@ describe('§4.1 rule matching', () => {
     // A non-recursive rm is not this rule's business.
     assert.equal(decisionOf('rm -f /tmp/x'), 'allow')
     assert.ok(!idsOf('rm -f /tmp/x').includes('rm-recursive'))
+    // `git rm` is recoverable from the object database: a VCS op, not a wipe.
+    assert.equal(decisionOf('git rm -r --cached .'), 'allow')
+    assert.ok(!idsOf('git rm -r --cached .').includes('rm-recursive'))
+    // Piped through another command, it is still a recursive delete.
+    assert.equal(decisionOf('xargs rm -rf'), 'block')
+    assert.equal(decisionOf('find / -exec rm -rf {} ;'), 'block')
   })
 
   test('dd-write matches dd to /dev and mkfs', () => {
