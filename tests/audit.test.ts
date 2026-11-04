@@ -163,6 +163,20 @@ describe('record shapes (§3.4)', () => {
     assert.equal(record.approved, null)
     assert.equal(record.exitCode, null)
     assert.equal(record.policyRule, 'rm-recursive')
+    // Nothing ran, so the execution-only fields are absent rather than zeroed.
+    assert.equal('durationMs' in record, false)
+    assert.equal('truncated' in record, false)
+  })
+
+  test('an exec record without a decision is rejected, never defaulted to allow', async () => {
+    const log = new AuditLog({ file })
+    const { decision: _omitted, ...withoutDecision } = EXEC_ENTRY
+    await assert.rejects(log.append(withoutDecision as never), (error: unknown) => {
+      assert.ok(error instanceof AuditError)
+      assert.match(error.message, /decision/)
+      return true
+    })
+    await assert.rejects(readFile(file, 'utf8'))
   })
 
   test('an event record uses the event field and no exec decision', async () => {
