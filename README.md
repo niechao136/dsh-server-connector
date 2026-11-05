@@ -211,7 +211,7 @@ Read it with srv_job_output, stop it with srv_job_kill.
 
 ### 什么时候用 `srv_policy_check`
 
-命令不确定会不会被拦时先预检，结论与真正执行完全一致（同一个纯函数）：
+命令不确定会不会被拦时先预检。它和 `srv_exec` 用的是同一个判定函数，所以结论不会互相打架：
 
 > 先 `srv_policy_check` 看一下，没问题再执行
 
