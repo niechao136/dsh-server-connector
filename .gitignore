@@ -1,3 +1,5 @@
 node_modules/
 *.tgz
 .DS_Store
+# Local npm registry/login overrides; never commit these.
+.npmrc
