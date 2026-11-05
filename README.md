@@ -48,15 +48,62 @@ DSH（DeepSeek Harness）插件：在本机配置好可运维的 SSH 服务器�
 
 ## 安装
 
-### 方式一：命令行
+四种方式，按推荐顺序排列。**装进哪个 profile 用 `--profile` 指定**，Web 界面即 `web`。
 
-在任意目录执行（`--profile` 指定装进哪个 profile，Web 界面即 `web`）：
+### 方式一：npm（推荐）
 
 ```bash
-# 从 GitHub 安装
-dsh plugin --profile web add github:niechao136/dsh-server-connector
+dsh plugin --profile web add dsh-server-connector
+```
 
-# 或从本地 checkout 安装（开发时）
+指定版本：`dsh plugin --profile web add dsh-server-connector@0.1.0`。
+
+国内网络若装不上或版本滞后，让 pnpm 走官方源：
+
+```bash
+dsh plugin --profile web add --registry=https://registry.npmjs.org/ dsh-server-connector
+```
+
+> npm 有约 24 小时的「新版本冷却期」（防供应链投毒），刚发布的版本可能暂时装不上，属正常。
+
+### 方式二：GitHub Release 的 tarball（离线 / 锁定版本）
+
+从 [Releases](https://github.com/niechao136/dsh-server-connector/releases) 下载
+`dsh-server-connector-<version>.tgz`，然后：
+
+```bash
+dsh plugin --profile web add ./dsh-server-connector-0.1.0.tgz
+```
+
+tarball 是**预构建**的，安装时不会执行任何构建脚本，因此 pnpm 不会要求
+`allowBuilds` 授权——适合不想让第三方代码在安装时运行的场景。
+
+校验下载完整性（可选）：
+
+```bash
+# 每个 Release 的说明里都附有 SHA-256
+sha256sum dsh-server-connector-0.1.0.tgz        # Linux / macOS
+certutil -hashfile dsh-server-connector-0.1.0.tgz SHA256   # Windows
+```
+
+### 方式三：GitHub 源码
+
+```bash
+dsh plugin --profile web add github:niechao136/dsh-server-connector
+```
+
+锁到某个提交更稳（后续推送无法悄悄改变实际运行的内容）：
+
+```bash
+dsh plugin --profile web add github:niechao136/dsh-server-connector#<sha>
+```
+
+本仓库的 `lib/` 是已提交的纯 JS，没有 `prepare` 构建脚本，所以 git 安装后立即可用，
+不会被 pnpm ≥10 的构建脚本拦截。
+
+### 方式四：本地 checkout（开发时）
+
+```bash
 dsh plugin --profile web add /path/to/dsh-server-connector
 ```
 
@@ -65,7 +112,7 @@ dsh plugin --profile web add /path/to/dsh-server-connector
 
 ```json
 {
-  "dependencies": { "dsh-server-connector": "github:niechao136/dsh-server-connector" },
+  "dependencies": { "dsh-server-connector": "0.1.0" },
   "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-server-connector"] } }
 }
 ```
@@ -80,16 +127,32 @@ dsh --profile web --dump-config | grep -A2 dsh-server-connector
 
 卸载：`dsh plugin --profile web remove dsh-server-connector`（会同时取消 bundle 选择）。
 
-### 方式二：Web 界面
+### 方式五：Web 界面
 
 1. 左侧栏进入 **插件**；
 2. 右上角 **添加插件**；
-3. 填入 GitHub 地址或本地绝对路径，选择安装源，点 **安装**；
+3. 填入 `dsh-server-connector`（npm 名）、GitHub 地址或本地绝对路径，选择安装源，点 **安装**；
 4. 安装完成后在「已安装插件」里确认开关是打开的。
 
 ![添加插件对话框](./docs/usage/install-dialog.png)
 
 装完若侧边栏没有出现「服务器」，重启一次 `dsh web` 再试。
+
+---
+
+## 版本与分发渠道
+
+同一个版本号在四个渠道同时提供，内容一致：
+
+| 渠道 | 地址 | 适用 |
+|---|---|---|
+| npm | `dsh-server-connector` | 日常安装，`dsh plugin add` 直接可用 |
+| GitHub Release | 附 `.tgz` + SHA-256 | 离线环境、锁定版本、审计 |
+| GitHub 源码 | `github:niechao136/dsh-server-connector` | 想跟源码或钉到某个提交 |
+| 本地 checkout | 绝对路径 | 开发调试 |
+
+国内镜像（npmmirror）会自动同步 npm 上的发布，通常几分钟内可用；若滞后，按上文
+「方式一」加 `--registry=https://registry.npmjs.org/` 直连官方源。
 
 ---
 
