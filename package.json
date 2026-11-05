@@ -1,6 +1,6 @@
 {
   "name": "dsh-server-connector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH plugin: SSH execution for servers configured on this machine, with a built-in high-risk command policy (block / confirm / allow).",
   "type": "module",
   "main": "lib/index.js",
@@ -18,7 +18,8 @@
     "lib",
     "locale",
     "icon.svg",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "CHANGELOG.md"
   ],
   "icon": "./icon.svg",
   "engines": {
