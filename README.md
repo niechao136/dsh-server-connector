@@ -4,7 +4,7 @@ DSH（DeepSeek Harness）插件：在本机配置好可运维的 SSH 服务器�
 `srv_*` 工具直接在那些机器上执行命令；内置高危命令策略、逐条审批、执行审计与两段式危险操作确认。
 
 本 README 侧重**怎么用**：安装、添加服务器、让 agent 执行、看懂审批与审计、调整配置。
-设计细节（数据模型、实现取舍）见 [`2026-11-04-server-connector-plugin-design.md`](./2026-11-04-server-connector-plugin-design.md)。
+设计细节（数据模型、实现取舍）见 [`docs/design.md`](./docs/design.md)。
 
 - 运行环境：DSH `>=0.1.0-rc.6 <0.3.0`，Node `^22.19.0 || >=24.0.0`
 - 插件形态：Host 半（`srv_*` 工具、连接池、策略、审计）+ Client 半（侧边栏「服务器」面板与设置页）
@@ -20,6 +20,7 @@ DSH（DeepSeek Harness）插件：在本机配置好可运维的 SSH 服务器�
 - [服务器面板](#服务器面板)
 - [Agent 工具](#agent-工具)
 - [高危命令策略](#高危命令策略)
+  - [自定义规则（每台服务器独立）](#自定义规则每台服务器独立)
 - [审批与两段式确认](#审批与两段式确认)
 - [输出与后台任务](#输出与后台任务)
 - [审计](#审计)
@@ -319,6 +320,44 @@ Read it with srv_job_output, stop it with srv_job_kill.
 > **提醒**：正则拦不住 `python -c "import shutil; shutil.rmtree('/')"` 这类变形。
 > 请配合远端专用低权限用户与 sudo 白名单使用。
 
+### 自定义规则（每台服务器独立）
+
+内置 20 条不可能覆盖所有人的「危险」。服务器详情页的 **自定义规则** 区块可以给
+**单台** 服务器补规则，不必改插件、不必等发版。
+
+在详情页点 **新增规则**，填四项：
+
+| 字段 | 说明 |
+|---|---|
+| 标签 | 审批理由里显示的名字 |
+| 正则 | **JavaScript 正则**（见下方方言说明） |
+| 默认档 | 只有 `confirm` / `block`；不允许 `allow`（放行是默认行为，写了没意义） |
+| 样例命令 | 每行一条，**至少一条必须命中**，否则保存会被拒绝 |
+
+先点 **试跑** 再点 **保存**。试跑会逐条告诉你「这条命令会不会被拦」，并且
+**不写盘**——它和真正执行走的是同一个判定函数，所以结论不会不一致。
+
+几个要点：
+
+- **正则是 JavaScript 方言，不是 POSIX。** 用 `\s`、`\d`、`\b`；`[[:space:]]`
+  这类 POSIX 字符类在 JS 里**不生效**（会被当成普通字符）。写错了不会报错，
+  只是永远不命中——而「永不命中」会被样例检查挡下来，你在保存时就能看见。
+- **规则 id 由服务端生成**（`custom-1`、`custom-2`…），面板不让你填，避免和内置 id 撞车。
+- **新建/修改/删除不走待确认区**：它们只会让限制变严。唯一例外是「停用」，
+  等同于改 `disabledRules`，仍走两段式确认。
+- **每台服务器最多 50 条**；正则最长 512 字符，且拒绝 `(a+)+` 这类嵌套量词（防正则回溯卡死）。
+
+例如给一台跑 Docker 的机器加：
+
+```
+标签：删 Docker 卷
+正则：docker\s+compose\s+down\s+-v
+默认档：confirm
+样例：docker compose down -v
+```
+
+之后 agent 执行 `docker compose down -v` 时会先弹审批，`srv_policy_check` 也会返回 `confirm`。
+
 ---
 
 ## 审批与两段式确认
@@ -510,7 +549,7 @@ npm run typecheck    # tsc --noEmit
 测试分两层：单元测试覆盖策略、注册表、审计、待确认队列与工具面；集成测试跑真实
 `ssh2` 服务端与真实审批服务，Docker 可用时还会起一个 OpenSSH 容器验证超时杀进程组。
 
-- 设计规格：[`2026-11-04-server-connector-plugin-design.md`](./2026-11-04-server-connector-plugin-design.md)
+- 设计规格：[`docs/design.md`](./docs/design.md)
 - 界面截图与采集方式：[`docs/usage/README.md`](./docs/usage/README.md)
 - 历史界面变更对照：[`docs/phase5/README.md`](./docs/phase5/README.md)
 

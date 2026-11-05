@@ -101,6 +101,7 @@ describe('first creation from nothing', () => {
       defaultWorkDir: '/srv/app',
       policy: { 'rm-recursive': 'block', 'service-restart': 'confirm' },
       disabledRules: ['docker-prune'],
+      customRules: [],
       createdAt: created.createdAt,
       lastConnectedAt: null,
     })
@@ -442,5 +443,67 @@ describe('file-level failures are reported, never silently rewritten', () => {
     await mkdir(join(directory, 'server-connector'), { recursive: true })
     await writeFile(file, JSON.stringify({ version: 1, servers: [record] }), 'utf8')
     assert.equal((await rejection(registry.list())).code, 'INVALID_REGISTRY')
+  })
+})
+
+describe('customRules (§4.4)', () => {
+  /** A minimal valid rule; `id` is supplied per test. */
+  const customRule = (overrides: Record<string, unknown> = {}) => ({
+    id: 'custom-1',
+    label: '删 Docker 卷',
+    pattern: String.raw`docker\s+compose\s+down\s+-v`,
+    defaultDecision: 'confirm',
+    description: 'down -v 会删除命名卷。',
+    ...overrides,
+  })
+
+  test('create() stores custom rules and defaults them to an empty list', async () => {
+    const plain = await registry.create({ ...VALID_INPUT, name: '无规则' })
+    assert.deepEqual(plain.customRules, [])
+
+    const withRule = await registry.create({ ...VALID_INPUT, name: '有规则', customRules: [customRule()] })
+    assert.equal(withRule.customRules.length, 1)
+    assert.equal(withRule.customRules[0]!.id, 'custom-1')
+    // The stored record round-trips through the file with the rule intact.
+    const reread = await registry.get(withRule.id)
+    assert.deepEqual(reread?.customRules, withRule.customRules)
+  })
+
+  test('create() rejects an invalid rule and never writes it', async () => {
+    await assert.rejects(
+      registry.create({ ...VALID_INPUT, name: '坏规则', customRules: [customRule({ defaultDecision: 'allow' })] }),
+      (error: unknown) => /customRules/.test((error as Error).message),
+    )
+    // A duplicate id inside one record is refused too.
+    await assert.rejects(
+      registry.create({
+        ...VALID_INPUT,
+        name: '重复 id',
+        customRules: [customRule(), customRule()],
+      }),
+      (error: unknown) => /already in use/.test((error as Error).message),
+    )
+    // A built-in id cannot be shadowed.
+    await assert.rejects(
+      registry.create({ ...VALID_INPUT, name: '撞内置', customRules: [customRule({ id: 'rm-recursive' })] }),
+      (error: unknown) => /already in use/.test((error as Error).message),
+    )
+  })
+
+  test('update() can add and remove custom rules', async () => {
+    const created = await registry.create({ ...VALID_INPUT, name: '可改规则' })
+    const added = await registry.update(created.id, { customRules: [customRule()] })
+    assert.equal(added.customRules.length, 1)
+    const cleared = await registry.update(created.id, { customRules: [] })
+    assert.deepEqual(cleared.customRules, [])
+  })
+
+  test('a hand-edited servers.json without customRules still loads', async () => {
+    // Older files predate the field; load must default it rather than fail.
+    await mkdir(join(directory, 'server-connector'), { recursive: true })
+    const doc = { version: REGISTRY_VERSION, servers: [{ ...VALID_INPUT, id: 'srv-01', createdAt: '2026-01-01T00:00:00.000Z', lastConnectedAt: null }] }
+    await writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+    const loaded = await registry.get('srv-01')
+    assert.deepEqual(loaded?.customRules, [])
   })
 })

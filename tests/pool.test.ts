@@ -108,6 +108,7 @@ function record(overrides: Partial<ServerRecord> & { id?: string } = {}): Server
     defaultWorkDir: null,
     policy: {},
     disabledRules: [],
+    customRules: [],
     createdAt: '2026-11-04T09:00:00.000Z',
     lastConnectedAt: null,
     ...overrides,

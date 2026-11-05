@@ -200,8 +200,8 @@ async function createServer(api: ReturnType<typeof createApi>, overrides: Record
 }
 
 describe('route table (§8.5)', () => {
-  test('declares exactly the eleven documented endpoints', () => {
-    assert.equal(API_ROUTES.length, 11)
+  test('declares exactly the documented endpoints', () => {
+    assert.equal(API_ROUTES.length, 15)
     const surface = API_ROUTES.map((route) => `${route.method} ${route.path}`)
     assert.deepEqual(surface, [
       'GET /servers',
@@ -215,6 +215,10 @@ describe('route table (§8.5)', () => {
       'GET /pending',
       'POST /pending/:id/confirm',
       'POST /pending/:id/cancel',
+      'POST /servers/:id/rules',
+      'PUT /servers/:id/rules/:ruleId',
+      'DELETE /servers/:id/rules/:ruleId',
+      'POST /servers/:id/rules/preview',
     ])
     assert.equal(API_PREFIX, '/server-connector')
   })
@@ -882,5 +886,129 @@ describe('node:http adapter', () => {
     } finally {
       await running.close()
     }
+  })
+})
+
+// ------------------------------------------------ custom rules (§4.4, §8.5) --
+
+describe('custom rule routes', () => {
+  /** A valid body; `samples` is what makes the "must fire" check pass. */
+  const ruleBody = (overrides: Record<string, unknown> = {}) => ({
+    label: '删 Docker 卷',
+    pattern: String.raw`docker\s+compose\s+down\s+-v`,
+    defaultDecision: 'confirm',
+    description: 'down -v 会删除命名卷。',
+    samples: ['docker compose down -v'],
+    ...overrides,
+  })
+
+  test('POST adds a rule, assigns the id server-side and returns it', async () => {
+    const { api } = stack()
+    await createServer(api)
+    const answer = await call(api, 'POST', '/servers/srv-01/rules', { body: ruleBody() })
+    assert.equal(answer.status, 201)
+    assert.equal(answer.body.rule.id, 'custom-1')
+    assert.equal(answer.body.rule.defaultDecision, 'confirm')
+    // The record now carries the rule, and the response never leaks a secret:
+    // `passwordConfigured` is a boolean flag, never the value or the reference.
+    assert.equal(answer.body.server.customRules.length, 1)
+    assert.equal(JSON.stringify(answer.body).includes('credentialRef'), false)
+    assert.equal(JSON.stringify(answer.body).includes('_authToken'), false)
+  })
+
+  test('a second rule gets the next free id, not a duplicate', async () => {
+    const { api } = stack()
+    await createServer(api)
+    await call(api, 'POST', '/servers/srv-01/rules', { body: ruleBody() })
+    const second = await call(api, 'POST', '/servers/srv-01/rules', {
+      body: ruleBody({ label: 'terraform destroy', pattern: String.raw`terraform\s+destroy`, samples: ['terraform destroy'] }),
+    })
+    assert.equal(second.status, 201)
+    assert.equal(second.body.rule.id, 'custom-2')
+  })
+
+  test('rejects a rule that never matches its samples, an unparsable one and "allow"', async () => {
+    const { api } = stack()
+    await createServer(api)
+    const never = await call(api, 'POST', '/servers/srv-01/rules', {
+      body: ruleBody({ pattern: 'nothing\s+here', samples: ['ls -la'] }),
+    })
+    assert.equal(never.status, 400)
+    assert.equal(never.body.error.code, 'RULE_NEVER_MATCHES')
+
+    const broken = await call(api, 'POST', '/servers/srv-01/rules', { body: ruleBody({ pattern: 'a(' }) })
+    assert.equal(broken.status, 400)
+    assert.equal(broken.body.error.code, 'INVALID_RULE')
+
+    const permissive = await call(api, 'POST', '/servers/srv-01/rules', { body: ruleBody({ defaultDecision: 'allow' }) })
+    assert.equal(permissive.status, 400)
+    assert.equal(permissive.body.error.code, 'INVALID_RULE')
+  })
+
+  test('the preview endpoint reports per-sample matches without writing', async () => {
+    const { api, registry } = stack()
+    await createServer(api)
+    const answer = await call(api, 'POST', '/servers/srv-01/rules/preview', {
+      body: {
+        label: 'preview',
+        pattern: String.raw`docker\s+compose\s+down\s+-v`,
+        defaultDecision: 'confirm',
+        samples: ['docker compose down -v', 'ls -la'],
+      },
+    })
+    assert.equal(answer.status, 200)
+    assert.equal(answer.body.results[0].matched, true)
+    assert.equal(answer.body.results[1].matched, false)
+    assert.equal(answer.body.anyMatched, true)
+    // Nothing was persisted: the record still has no custom rules.
+    assert.equal((await registry.get('srv-01'))?.customRules.length, 0)
+  })
+
+  test('PUT replaces a rule but keeps its id, and DELETE removes it cleanly', async () => {
+    const { api, registry } = stack()
+    await createServer(api)
+    await call(api, 'POST', '/servers/srv-01/rules', { body: ruleBody() })
+    const updated = await call(api, 'PUT', '/servers/srv-01/rules/custom-1', {
+      body: ruleBody({ defaultDecision: 'block', label: '删卷（阻断）' }),
+    })
+    assert.equal(updated.status, 200)
+    assert.equal(updated.body.rule.id, 'custom-1')
+    assert.equal(updated.body.rule.defaultDecision, 'block')
+    assert.equal(updated.body.rule.label, '删卷（阻断）')
+
+    const removed = await call(api, 'DELETE', '/servers/srv-01/rules/custom-1')
+    assert.equal(removed.status, 200)
+    assert.equal(removed.body.server.customRules.length, 0)
+    // The id is also dropped from `policy`, so no key outlives its rule.
+    assert.equal('custom-1' in ((await registry.get('srv-01'))?.policy ?? {}), false)
+  })
+
+  test('an unknown rule id is a 404 on update and delete', async () => {
+    const { api } = stack()
+    await createServer(api)
+    const put = await call(api, 'PUT', '/servers/srv-01/rules/custom-9', { body: ruleBody() })
+    assert.equal(put.status, 404)
+    assert.equal(put.body.error.code, 'RULE_NOT_FOUND')
+    const del = await call(api, 'DELETE', '/servers/srv-01/rules/custom-9')
+    assert.equal(del.status, 404)
+  })
+
+  test('policy may target a custom rule id, but a custom "block" cannot drop to "allow"', async () => {
+    const { api } = stack()
+    await createServer(api)
+    const blocked = await call(api, 'POST', '/servers/srv-01/rules', {
+      body: ruleBody({ defaultDecision: 'block' }),
+    })
+    assert.equal(blocked.status, 201)
+    const loosened = await call(api, 'PUT', '/servers/srv-01', {
+      body: { policy: { 'custom-1': 'allow' } },
+    })
+    assert.equal(loosened.status, 400)
+    assert.equal(loosened.body.error.code, 'INVALID_POLICY')
+    const tightened = await call(api, 'PUT', '/servers/srv-01', {
+      body: { policy: { 'custom-1': 'confirm' } },
+    })
+    assert.equal(tightened.status, 200)
+    assert.equal(tightened.body.server.policy['custom-1'], 'confirm')
   })
 })

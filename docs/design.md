@@ -1,6 +1,6 @@
-# dsh-server-connector 插件设计规格
+# dsh-server-connector 设计规格
 
-日期：2026-11-04
+日期：2026-11-04（2026-11-05 增补自定义规则）
 状态：已批准（分节评审通过）
 目标仓库：新建独立仓库（本规格不提交到 dev-ops-mcp）
 
@@ -122,6 +122,15 @@ DeepSeek Harness（DSH）原生插件，彻底去掉 Docker、SQLite、独立 We
       "service-restart": "confirm"
     },
     "disabledRules": ["docker-prune"], // 彻底停用的规则 id；修改必须走待确认区
+    "customRules": [                   // 本服务器独有的规则（§4.4），按序追加在内置规则之后
+      {
+        "id": "custom-1",              // 服务器内唯一；与内置 id 冲突时拒绝
+        "label": "删 Docker 卷",
+        "pattern": "docker\\s+compose\\s+down\\s+-v",
+        "defaultDecision": "confirm",
+        "description": "down -v 会删除 compose 声明的命名卷，数据不可恢复。"
+      }
+    ],
     "createdAt": "2026-11-04T09:00:00Z",
     "lastConnectedAt": "2026-11-04T09:20:00Z"
   }]
@@ -210,12 +219,17 @@ $DSH_HOME/server-connector/
    （不能只匹配第一段 —— 否则 `echo ok && rm -rf /` 会漏判）。
 2. 命中多条时取**最严**的：`block > confirm > allow`。
 3. 服务器 `policy` 可覆盖默认，但 **`block` 不能降级为 `allow`**，只能显式降为 `confirm`。
+   该保护只作用于**内置规则**；自定义规则的默认档位由作者自己决定（§4.4）。
 4. 要彻底放开某条规则，只能把该规则 id 加入服务器的 `disabledRules`（例如
    `"disabledRules": ["rm-recursive"]`）。该字段的任何修改**必须走待确认区**（第 8.3 节），
    并在审计写一条 `rule-disabled` 事件。被停用的规则在 `srv_policy_check` 与 `srv_exec`
-   中都视为不存在 —— 两者复用同一个纯函数，故结论始终一致。
-5. 未命中任何规则 → `allow`。
-6. 判定是**纯函数**，`srv_policy_check` 直接复用它，保证「预检」与「执行」结论一致。
+   中都视为不存在 —— 两者复用同一个纯函数，故结论始终一致。`disabledRules` 同样接受自定义规则 id。
+5. 参与判定的规则集 = **内置 20 条 + 该服务器的 `customRules`**，按此顺序遍历；自定义规则
+   与内置规则走完全相同的匹配与取严逻辑，不享有任何特权。
+6. 未命中任何规则 → `allow`。
+7. 判定是**纯函数**，`srv_policy_check` 直接复用它，保证「预检」与「执行」结论一致。
+   纯函数的入参因此必须自带 `customRules`：`check(command, server)` 从服务器记录读取，
+   而不是从模块级常量读取。
 
 ### 4.3 明确的安全边界声明
 
@@ -223,6 +237,79 @@ $DSH_HOME/server-connector/
 或 `base64 -d | sh`。真正的硬边界在远端：
 专用低权限用户 + sudo 白名单（即现有 `mcp-init.sh` 已经在做的事）。
 本规格不承诺「插件能阻止一切破坏性操作」，只承诺「已知模式会被拦下或被要求确认」。
+
+### 4.4 自定义规则（每服务器独立）
+
+内置 20 条覆盖的是「公认的破坏性操作」。不同用户对「危险」的定义不同：运维在意
+`docker compose down -v` 会删卷，DBA 在意 `DROP SCHEMA`，前端在意 `npm publish`。
+自定义规则让每台服务器补自己的那几条，**不必修改插件、不必重新发版**。
+
+#### 4.4.1 规则形态
+
+```jsonc
+{
+  "id": "custom-1",            // 服务器内唯一；不得与内置 id 相同
+  "label": "删 Docker 卷",      // 审批理由里显示
+  "pattern": "docker\\s+compose\\s+down\\s+-v",
+  "defaultDecision": "confirm", // confirm | block（**不允许 allow**）
+  "description": "down -v 会删除命名卷，数据不可恢复。"
+}
+```
+
+设计取舍：
+
+- **只允许 `confirm` / `block` 两个默认档。** 自定义规则的用途是「多拦一道」，
+  默认 `allow` 毫无意义 —— 不写这条规则效果完全一样。这条限制同时挡住了
+  「用自定义规则伪装成放行」的误用。
+- **`pattern` 是正则源码（字符串），不是 glob。** 存成字符串而非 `RegExp` 是因为
+  它要进 `servers.json`；引擎在读取时编译。
+- **正则方言是 JavaScript，不是 POSIX。** `\s`、`\d`、`\b` 可用；`[[:space:]]`
+  这类 POSIX 字符类**不可用**（JS 会把它当成普通字符）。在 JSON 里反斜杠要写两次
+  （`"\\s"`），面板输入框里只写一次（`\s`）。这是最容易踩的坑：写错了不会报错，
+  只是永远不命中 —— 而「永不命中」会被 §4.4.2 的必中样例检查挡下，用户保存时就能看见。
+- **`id` 由服务端生成**（`custom-N`，N 为自增），面板不允许自定义 id ——
+  避免与内置 id 撞车，也避免用户改 id 导致 `disabledRules` 失联。
+- **每服务器独立存储**，不设全局继承层。理由：规则与机器强相关（这台是生产库、
+  那台是构建机），跨机共享反而制造「为什么这台没生效」的困惑。
+
+#### 4.4.2 编译与校验（保存时，不是执行时）
+
+保存一条规则要过六道检查，任何一道失败都返回 400 且**不落盘**：
+
+| 检查 | 拒绝条件 | 理由 |
+|---|---|---|
+| 长度 | `pattern` 超过 512 字符 | 超长正则多半是粘贴错误，也放大回溯风险 |
+| 可编译 | `new RegExp(pattern)` 抛异常 | 语法错的规则存进去等于静默失效 |
+| 空匹配 | `/""/`、`/(?:)/` 之类能匹配空串 | 会命中一切命令，等于把整台机器锁死 |
+| 嵌套量词 | `(a+)+`、`(a*)*`、`(.*)*` 形态 | 灾难性回溯（ReDoS），一条规则能卡死执行 |
+| 必中样例 | 试跑时**没有**匹配到用户提供的样例命令 | 写宽了会误拦、写窄了会漏拦，都得当场看见 |
+| id 冲突 | 与内置 id 或同机其他自定义 id 重复 | 保证 `policy` / `disabledRules` 的键唯一 |
+
+嵌套量词检查用一条保守的正则（`\(\s*[^()]*[+*]\s*\)\s*[+*]`），宁可错拒也不放过：
+它只拒绝「可疑形态」，用户可以把 `(a+)+` 改写成 `a{2,}` 绕过，这是**有意的**——
+本规格不承诺防御恶意规则，只承诺防御手滑。
+
+#### 4.4.3 试跑（save 前必须能预览）
+
+新增 `POST /server-connector/servers/:id/rules/preview`，请求体
+`{ pattern, defaultDecision, samples: ["..."] }`，返回每条样例的
+`{ sample, matched, decision, matchedRule }`。面板在「保存」旁边放一个
+「试跑」按钮，**试跑不写盘**。
+
+试跑复用同一个 `check()`，因此「试跑说会拦」与「真执行会拦」不可能不一致。
+这一步是自定义规则最关键的防呆设计：正则写错在本机当场可见，
+而不是等到某天 agent 真的跑了那条命令才发现规则没生效。
+
+#### 4.4.4 与既有机制的关系
+
+- **`disabledRules` 可停用自定义规则**，走同一套两段式确认与 `rule-disabled` 审计事件。
+- **`policy` 可覆盖自定义规则的默认档**，但不能把自定义的 `block` 降为 `allow`
+  —— 与内置规则同一条保护。
+- **审计记录**：命中自定义规则的执行，`audit.log` 的 `ruleId` 记自定义 id，
+  与内置规则可区分。
+- **系统提示**：§5.3 的规则摘要只统计**内置** 20 条的 block/confirm 数量，
+  自定义规则以「另有 N 条自定义规则」一句带过 —— 系统提示是给模型看的，
+  逐条列出自定义规则会稀释它真正需要的信息（哪台机器、怎么调）。
 
 ---
 
@@ -277,6 +364,10 @@ $DSH_HOME/server-connector/
 `CONNECT_FAILED` / `HOST_KEY_UNKNOWN` / `AUTH_FAILED` / `POLICY_BLOCKED` /
 `POLICY_DENIED_BY_USER` / `TIMEOUT` / `EXIT_NONZERO` / `UNKNOWN_SERVER` / `AMBIGUOUS_SERVER` /
 `NO_CREDENTIAL`。每种都带一句可执行的下一步提示。
+
+自定义规则（§4.4）复用既有错误面，不新增工具错误码：规则校验失败发生在**面板的
+HTTP 路由**里，返回 `400 INVALID_RULE`（沿用 `INVALID_SERVER` / `INVALID_POLICY` 的
+同族命名），不会成为模型可见的工具错误。
 
 ---
 
@@ -480,6 +571,7 @@ hostVerifier: (keyHash, callback) => {
 | 主机密钥策略 | 下拉 accept-new / verify / off | 选 `off` → **写入待确认区**，不立即生效 |
 | 默认工作目录 | 文本框 | 绝对路径 |
 | 高危策略 | 表格，每行一个内置规则 + 四选一（allow / confirm / block / 停用） | `block` 只能改 `confirm`，不能直接改 `allow`；选「停用」→ **写入待确认区**，不立即生效 |
+| 自定义规则 | 列表 + 「新增规则」按钮；每条含标签、正则、默认档（confirm / block）、说明，附「试跑」框 | 见 §4.4.2 六道检查；试跑不写盘；「停用」→ **写入待确认区** |
 
 ### 8.5 HTTP 路由（`ctx.webServer.register`）
 
@@ -496,6 +588,14 @@ hostVerifier: (keyHash, callback) => {
 | `GET /server-connector/pending` | 待确认列表 |
 | `POST /server-connector/pending/:id/confirm` | 确认执行 |
 | `POST /server-connector/pending/:id/cancel` | 取消 |
+| `POST /server-connector/servers/:id/rules` | 新增一条自定义规则（校验后落盘） |
+| `PUT /server-connector/servers/:id/rules/:ruleId` | 修改一条自定义规则 |
+| `DELETE /server-connector/servers/:id/rules/:ruleId` | 删除一条自定义规则 |
+| `POST /server-connector/servers/:id/rules/preview` | **试跑正则，不写盘**（§4.4.3） |
+
+自定义规则的增删改**不走待确认区**：它们只增加或收紧限制，不会放宽既有保护
+（`block → allow` 的降级路径已被 §4.4.2 拒绝）。唯一例外是「停用」，它等价于
+`disabledRules` 的修改，仍走两段式确认。
 
 路由与 GUI 同一信任边界（DSH `webServer` 已受连接层鉴权保护）。
 
@@ -627,6 +727,9 @@ plugin_manager install_bundle  target=<abs path to dsh-server-connector>
 | `ctx.approval` 依赖 turn | 面板操作无法复用 | 面板危险操作改走待确认区（第 8.3 节） |
 | 审计无查询能力 | 只能 grep | 可接受；需要时另做分析脚本 |
 | 系统提示对所有会话可见 | 去掉会话绑定后的取舍 | 超过 8 台时折叠 |
+| 自定义规则的正则写错 | 写宽会误拦、写窄会漏拦，而用户以为「加了规则就安全了」 | 保存时六道校验（§4.4.2）+ 必中样例试跑（§4.4.3）+ 面板明示「这是遏制不是边界」 |
+| 自定义规则引发 ReDoS | 一条病态正则能卡住该服务器的所有执行 | 拒绝嵌套量词、限制 512 字符；规则数上限 50 条/服务器 |
+| 自定义规则制造虚假安全感 | 用户可能因此放松远端降权 | §4.3 的边界声明在面板与 README 两处重复出现；自定义规则不改变「远端才是硬边界」 |
 
 ---
 

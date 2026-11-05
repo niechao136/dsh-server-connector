@@ -18,6 +18,11 @@ import {
   compareDecisions,
   effectiveDecision,
   splitSubcommands,
+  validateCustomRule,
+  RuleError,
+  MAX_CUSTOM_RULES,
+  MAX_CUSTOM_PATTERN_LENGTH,
+  rulesFor,
 } from '../lib/policy.js'
 
 /** Narrow helper so a test reads `decisionOf('rm -rf /') === 'block'`. */
@@ -434,5 +439,146 @@ describe('§4.2.5 / §4.2.6 no match is allow, and the verdict is pure', () => {
 
   test('checkCommand is the same function as check', () => {
     assert.equal(checkCommand, check)
+  })
+})
+
+// ------------------------------------------------------ custom rules (§4.4) --
+
+/** A minimal valid custom rule, overridable per test. */
+function rule(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'custom-1',
+    label: '删 Docker 卷',
+    pattern: 'docker\\s+compose\\s+down\\s+-v',
+    defaultDecision: 'confirm',
+    description: 'down -v 会删除命名卷。',
+    ...overrides,
+  }
+}
+
+describe('custom rules are part of the same sweep (§4.2.5, §4.4)', () => {
+  test('a custom rule is stored on the server and decides like a built-in', () => {
+    const validated = validateCustomRule(rule())
+    const server = { customRules: [validated], policy: {} }
+    assert.equal(decisionOf('docker compose down -v', server), 'confirm')
+    // A command the custom rule does not mention still falls through to allow.
+    assert.equal(decisionOf('docker compose down', server), 'allow')
+    // Without the rule the same command is allowed, so the rule is what fired.
+    assert.equal(decisionOf('docker compose down -v', { policy: {} }), 'allow')
+  })
+
+  test('custom rules are per server: one server\'s rule never leaks to another', () => {
+    const withRule = { customRules: [validateCustomRule(rule())], policy: {} }
+    const without = { customRules: [], policy: {} }
+    assert.equal(decisionOf('docker compose down -v', withRule), 'confirm')
+    assert.equal(decisionOf('docker compose down -v', without), 'allow')
+  })
+
+  test('strictest wins across built-in and custom rules', () => {
+    const custom = validateCustomRule(rule({ defaultDecision: 'block' }))
+    const server = { customRules: [custom], policy: {} }
+    // rm-recursive is block, the custom rule is block too; either way block wins.
+    assert.equal(decisionOf('rm -rf / && docker compose down -v', server), 'block')
+  })
+
+  test('a custom rule may be disabled through disabledRules', () => {
+    const custom = validateCustomRule(rule())
+    const server = { customRules: [custom], policy: {}, disabledRules: [custom.id] }
+    assert.equal(decisionOf('docker compose down -v', server), 'allow')
+  })
+
+  test('policy may override a custom rule, but block cannot drop to allow', () => {
+    const custom = validateCustomRule(rule({ defaultDecision: 'block' }))
+    const server = { customRules: [custom], policy: { [custom.id]: 'allow' } }
+    // effectiveDecision refuses the block→allow jump for every rule, custom or not.
+    assert.equal(decisionOf('docker compose down -v', server), 'confirm')
+  })
+
+  test('rulesFor appends custom rules after the built-ins and skips unparsable ones', () => {
+    const custom = validateCustomRule(rule())
+    const compiled = rulesFor([custom])
+    assert.equal(compiled.length, RULES.length + 1)
+    assert.equal(compiled[RULES.length]!.id, custom.id)
+    // A record whose pattern no longer compiles is skipped, not fatal.
+    const broken = rulesFor([{ ...custom, pattern: 'a(' } as never])
+    assert.equal(broken.length, RULES.length)
+    assert.deepEqual(rulesFor(undefined), RULES)
+  })
+})
+
+describe('custom rule validation (§4.4.2)', () => {
+  test('rejects a non-object, an empty label and an over-long label', () => {
+    assert.throws(() => validateCustomRule(null), RuleError)
+    assert.throws(() => validateCustomRule(rule({ label: '   ' })), RuleError)
+    assert.throws(() => validateCustomRule(rule({ label: 'x'.repeat(81) })), RuleError)
+  })
+
+  test('refuses "allow" as a default: a permissive rule buys nothing', () => {
+    assert.throws(
+      () => validateCustomRule(rule({ defaultDecision: 'allow' })),
+      (error: unknown) => error instanceof RuleError && /confirm.*block/.test(error.message),
+    )
+  })
+
+  test('rejects an empty, over-long or unparsable pattern', () => {
+    assert.throws(() => validateCustomRule(rule({ pattern: '   ' })), RuleError)
+    assert.throws(() => validateCustomRule(rule({ pattern: 'a'.repeat(MAX_CUSTOM_PATTERN_LENGTH + 1) })), RuleError)
+    assert.throws(
+      () => validateCustomRule(rule({ pattern: 'a(' })),
+      (error: unknown) => error instanceof RuleError && /not a valid regular expression/.test(error.message),
+    )
+  })
+
+  test('rejects a pattern that matches the empty string', () => {
+    // An empty source trips the "non-empty" check first; the rest reach the
+    // empty-match guard, which is what stops a rule matching every command.
+    assert.throws(
+      () => validateCustomRule(rule({ pattern: '' })),
+      (error: unknown) => error instanceof RuleError && /non-empty/.test(error.message),
+    )
+    for (const pattern of ['a*', '(?:)', 'x?']) {
+      assert.throws(
+        () => validateCustomRule(rule({ pattern })),
+        (error: unknown) => error instanceof RuleError && /empty string/.test(error.message),
+        pattern,
+      )
+    }
+  })
+
+  test('rejects a nested quantifier that invites catastrophic backtracking', () => {
+    for (const pattern of ['(a+)+', '(a*)*', '(.*)+', '(x[^ ]*)*']) {
+      assert.throws(
+        () => validateCustomRule(rule({ pattern })),
+        (error: unknown) => error instanceof RuleError && /nested quantifier/.test(error.message),
+        pattern,
+      )
+    }
+  })
+
+  test('rejects an id that collides with a built-in or with another custom rule', () => {
+    assert.throws(() => validateCustomRule(rule({ id: 'rm-recursive' })), RuleError)
+    assert.throws(() => validateCustomRule(rule({ id: 'custom-1' }), { takenIds: ['custom-1'] }), RuleError)
+    assert.equal(validateCustomRule(rule({ id: 'custom-2' }), { takenIds: ['custom-1'] }).id, 'custom-2')
+  })
+
+  test('rejects a rule that matches none of the supplied samples', () => {
+    assert.throws(
+      () => validateCustomRule(rule(), { samples: ['ls -la', 'df -h'] }),
+      (error: unknown) => error instanceof RuleError && /never fire/.test(error.message),
+    )
+    // One matching sample is enough.
+    const ok = validateCustomRule(rule(), { samples: ['ls', 'docker compose down -v'] })
+    assert.equal(ok.id, 'custom-1')
+  })
+
+  test('a validated rule is frozen and keeps the documented shape', () => {
+    const validated = validateCustomRule(rule())
+    assert.deepEqual(Object.keys(validated).sort(), ['defaultDecision', 'description', 'id', 'label', 'pattern'])
+    assert.equal(Object.isFrozen(validated), true)
+  })
+
+  test('MAX_CUSTOM_RULES is a positive cap the registry enforces', () => {
+    assert.equal(typeof MAX_CUSTOM_RULES, 'number')
+    assert.ok(MAX_CUSTOM_RULES > 0)
   })
 })
