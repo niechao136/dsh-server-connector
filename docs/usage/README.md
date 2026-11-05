@@ -15,8 +15,8 @@ README 里引用的界面截图与采集方式。截图是**真实运行**的 DS
 - `@deepseek-ai/dsh@0.2.1-rc.5`，插件以 `link:` 方式装进一个独立 profile，
   该 profile 使用自己的 `$DSH_HOME`（`dsh plugin --profile web add <checkout>`）。
 - Chromium（Playwright 自带的 131.0.6778.33）headless，通过 CDP 驱动：
-  视口 1440×900（表单 1440×1080，详情 1440×2150），device scale 1，
-  `prefers-color-scheme: light`，`locale: zh-CN`。
+  视口宽 1440、device scale 1，`prefers-color-scheme: light`，`locale: zh-CN`；
+  各图高度按内容取 620（列表）/ 1000（安装对话框）/ 760（设置）/ 1080（表单）/ 2150（详情）。
 - 三台示例服务器（`本地演示机` / `生产机-A` / `测试机-B`）经由插件自己的
   `POST /server-connector/servers` 路由创建——与面板表单调用的是同一个接口。
 
