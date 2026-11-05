@@ -99,6 +99,7 @@ describe('first creation from nothing', () => {
       auth: { kind: 'key', privateKeyPath: '/root/.ssh/id_rsa' },
       hostKeyMode: 'accept-new',
       defaultWorkDir: '/srv/app',
+      enabled: true,
       policy: { 'rm-recursive': 'block', 'service-restart': 'confirm' },
       disabledRules: ['docker-prune'],
       customRules: [],
@@ -505,5 +506,35 @@ describe('customRules (§4.4)', () => {
     await writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
     const loaded = await registry.get('srv-01')
     assert.deepEqual(loaded?.customRules, [])
+  })
+})
+
+describe('the enable switch (§3.1, enable-switch spec)', () => {
+  test('create() defaults to enabled and round-trips the flag', async () => {
+    const on = await registry.create({ ...VALID_INPUT, name: '开' })
+    assert.equal(on.enabled, true)
+    const off = await registry.create({ ...VALID_INPUT, name: '关', enabled: false })
+    assert.equal(off.enabled, false)
+    assert.equal((await registry.get(off.id))?.enabled, false)
+  })
+
+  test('a record without the field loads as enabled, never as disabled', async () => {
+    // Files written before the switch existed carry no `enabled` key; treating
+    // the absence as "disabled" would silently cut every existing server off.
+    await mkdir(join(directory, 'server-connector'), { recursive: true })
+    const { enabled: _drop, ...rest } = VALID_INPUT as Record<string, unknown>
+    const legacy = { ...rest, id: 'srv-01', createdAt: '2026-01-01T00:00:00.000Z', lastConnectedAt: null }
+    await writeFile(file, `${JSON.stringify({ version: REGISTRY_VERSION, servers: [legacy] }, null, 2)}\n`, 'utf8')
+    assert.equal((await registry.get('srv-01'))?.enabled, true)
+  })
+
+  test('update() flips the flag and rejects a non-boolean', async () => {
+    const created = await registry.create({ ...VALID_INPUT, name: '可切' })
+    assert.equal((await registry.update(created.id, { enabled: false })).enabled, false)
+    assert.equal((await registry.update(created.id, { enabled: true })).enabled, true)
+    await assert.rejects(
+      registry.update(created.id, { enabled: 'no' }),
+      (error: unknown) => /enabled must be a boolean/.test((error as Error).message),
+    )
   })
 })

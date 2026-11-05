@@ -106,6 +106,7 @@ function record(overrides: Partial<ServerRecord> & { id?: string } = {}): Server
     auth: { kind: 'key', privateKeyPath: FIXTURES.privateKeyPath },
     hostKeyMode: 'accept-new',
     defaultWorkDir: null,
+    enabled: true,
     policy: {},
     disabledRules: [],
     customRules: [],

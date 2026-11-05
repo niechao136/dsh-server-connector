@@ -1037,3 +1037,42 @@ describe('§5.5 error types', () => {
     )
   })
 })
+
+describe('the enable switch (§5.1, enable-switch spec)', () => {
+  test('srv_list omits disabled servers entirely', async () => {
+    const registry = new Registry({ file: serversFile })
+    const a = await registry.create(serverInput())
+    const b = await registry.create({ ...serverInput(), name: '已禁用机', host: '10.0.0.6', enabled: false })
+    const surface = new ToolSurface({ registry, pool: new FakePool() as any, jobs: null })
+    const tool = toolsOf(surface).get('srv_list')
+    const rows = await tool.execute({}, toolExec())
+    assert.deepEqual(rows.map((row: any) => row.id), [a.id])
+    // The rendered text is what the model reads; it must not mention the hidden one.
+    const text = tool.output.render({}, rows)[0].text
+    assert.doesNotMatch(text, /已禁用机/)
+    assert.equal(b.enabled, false)
+  })
+
+  test('every srv_* tool rejects a disabled server with SERVER_DISABLED', async () => {
+    const registry = new Registry({ file: serversFile })
+    await registry.create({ ...serverInput(), enabled: false })
+    const surface = new ToolSurface({ registry, pool: new FakePool() as any, jobs: new FakeJobs() as any })
+    const tools = toolsOf(surface)
+    for (const name of ['srv_exec', 'srv_connect', 'srv_policy_check']) {
+      await assert.rejects(
+        tools.get(name).execute({ server: 'srv-01', command: 'echo hi' }, toolExec()),
+        (error: unknown) => (error as ToolError).code === 'SERVER_DISABLED',
+        name,
+      )
+    }
+  })
+
+  test('an enabled server still works after a sibling is disabled', async () => {
+    const registry = new Registry({ file: serversFile })
+    await registry.create(serverInput())
+    await registry.create({ ...serverInput(), name: '禁用的', host: '10.0.0.6', enabled: false })
+    const surface = new ToolSurface({ registry, pool: new FakePool() as any, jobs: null })
+    const text = await call(toolsOf(surface).get('srv_policy_check'), { server: 'srv-01', command: 'echo hi' })
+    assert.match(text, /ALLOW on srv-01/)
+  })
+})

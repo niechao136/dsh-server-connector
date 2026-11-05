@@ -1012,3 +1012,71 @@ describe('custom rule routes', () => {
     assert.equal(tightened.body.server.policy['custom-1'], 'confirm')
   })
 })
+
+// --------------------------------------- the enable switch (§8.5, spec §4) --
+
+describe('the enable switch', () => {
+  test('a new server is enabled and the flag is visible in the list', async () => {
+    const { api } = stack()
+    await createServer(api)
+    const listed = await call(api, 'GET', '/servers')
+    assert.equal(listed.body.servers[0].enabled, true)
+  })
+
+  test('PUT enabled:false flips it immediately, without a pending record', async () => {
+    const { api, registry, audit } = stack()
+    await createServer(api)
+    const answer = await call(api, 'PUT', '/servers/srv-01', { body: { enabled: false } })
+    assert.equal(answer.status, 200)
+    assert.equal(answer.body.server.enabled, false)
+    // Applied now, not queued: enabling/disabling never loosens a rule.
+    assert.deepEqual(answer.body.pending, [])
+    assert.equal((await registry.get('srv-01'))?.enabled, false)
+    // The switch is auditable even though it bypasses the pending queue.
+    const records = await audit.tail()
+    assert.equal(records.some((record: any) => record.event === 'server-disabled'), true)
+  })
+
+  test('PUT enabled:true re-enables and audits it', async () => {
+    const { api, registry, audit } = stack()
+    await createServer(api)
+    await call(api, 'PUT', '/servers/srv-01', { body: { enabled: false } })
+    const back = await call(api, 'PUT', '/servers/srv-01', { body: { enabled: true } })
+    assert.equal(back.status, 200)
+    assert.equal(back.body.server.enabled, true)
+    assert.equal((await registry.get('srv-01'))?.enabled, true)
+    const records = await audit.tail()
+    assert.equal(records.some((record: any) => record.event === 'server-enabled'), true)
+  })
+
+  test('disabling a server with a live connection is refused with 409', async () => {
+    const { api, pool } = stack()
+    await createServer(api)
+    await call(api, 'POST', '/connect/srv-01')
+    assert.equal(pool.connected.has('srv-01'), true)
+    const refused = await call(api, 'PUT', '/servers/srv-01', { body: { enabled: false } })
+    assert.equal(refused.status, 409)
+    assert.equal(refused.body.error.code, 'SERVER_CONNECTED')
+    // Still enabled: a refused switch must not half-apply.
+    const listed = await call(api, 'GET', '/servers')
+    assert.equal(listed.body.servers[0].enabled, true)
+  })
+
+  test('after disconnecting, the same server can be disabled', async () => {
+    const { api } = stack()
+    await createServer(api)
+    await call(api, 'POST', '/connect/srv-01')
+    await call(api, 'POST', '/disconnect/srv-01')
+    const answer = await call(api, 'PUT', '/servers/srv-01', { body: { enabled: false } })
+    assert.equal(answer.status, 200)
+    assert.equal(answer.body.server.enabled, false)
+  })
+
+  test('a non-boolean enabled is rejected', async () => {
+    const { api } = stack()
+    await createServer(api)
+    const bad = await call(api, 'PUT', '/servers/srv-01', { body: { enabled: 'off' } })
+    assert.equal(bad.status, 400)
+    assert.equal(bad.body.error.code, 'INVALID_SERVER')
+  })
+})

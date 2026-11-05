@@ -121,6 +121,7 @@ DeepSeek Harness（DSH）原生插件，彻底去掉 Docker、SQLite、独立 We
       "rm-recursive": "block",
       "service-restart": "confirm"
     },
+    "enabled": true,                   // 启用开关（§5.1、§8.2）；缺省视为 true
     "disabledRules": ["docker-prune"], // 彻底停用的规则 id；修改必须走待确认区
     "customRules": [                   // 本服务器独有的规则（§4.4），按序追加在内置规则之后
       {
@@ -328,6 +329,15 @@ $DSH_HOME/server-connector/
 
 `jobId` 自带服务器归属，故 `srv_job_output` / `srv_job_kill` 不需要 `server` 参数。
 
+**启用开关对工具面的影响**：被禁用的服务器（`enabled: false`）在模型视角下**不存在**。
+
+- `srv_list` **不返回**它；系统提示（§5.3）也**不列出**它。两者都返回空，而不是给一句
+  「另有 N 台已禁用」——禁用是运维的决策，不需要向模型解释。
+- 任何 `srv_*` 调用若解析到已禁用服务器，抛 `SERVER_DISABLED`，下一步提示是
+  「在面板中启用后再试」。覆盖 `srv_exec` / `srv_connect` / `srv_policy_check`。
+- 解析仍按 id / name / 唯一前缀进行（面板用 id 称呼它），禁用判定在**解析之后**，
+  所以不会因为禁用而把「前缀歧义」的语义也一并改掉。
+
 ### 5.2 server 参数解析（容错优先）
 
 1. 精确匹配 `id` → 命中
@@ -363,7 +373,7 @@ $DSH_HOME/server-connector/
 
 `CONNECT_FAILED` / `HOST_KEY_UNKNOWN` / `AUTH_FAILED` / `POLICY_BLOCKED` /
 `POLICY_DENIED_BY_USER` / `TIMEOUT` / `EXIT_NONZERO` / `UNKNOWN_SERVER` / `AMBIGUOUS_SERVER` /
-`NO_CREDENTIAL`。每种都带一句可执行的下一步提示。
+`SERVER_DISABLED` / `NO_CREDENTIAL`。每种都带一句可执行的下一步提示。
 
 自定义规则（§4.4）复用既有错误面，不新增工具错误码：规则校验失败发生在**面板的
 HTTP 路由**里，返回 `400 INVALID_RULE`（沿用 `INVALID_SERVER` / `INVALID_POLICY` 的
@@ -516,14 +526,20 @@ hostVerifier: (keyHash, callback) => {
 ```
 ┌─ 服务器 ──────────────────────────── [+ 新增] ─┐
 │  ● 生产机-A          devops@10.0.0.5:22        │
-│    /srv/app          [已连接] [测试] [编辑]     │
+│    /srv/app     [已连接] (开关) [测试] [编辑]   │
 │  ○ 测试机-B          devops@10.0.0.6:22        │
-│    /srv/app          [未连接] [测试] [编辑]     │
+│    /srv/app     [未连接] (开关) [测试] [编辑]   │
+│  ○ 老机器-C  已禁用   devops@10.0.0.7:22        │
+│    /srv/app     [已禁用] (开关) [测试] [编辑]   │
 └────────────────────────────────────────────────┘
 ```
 
 `●` 绿点 = 连接池有活连接；`○` 灰点 = 无。
-点进一行 → 详情页：连接四字段只读、高危策略表、最近 20 条审计、[删除]。
+点进一行 → 详情页：连接四字段只读、高危策略表、自定义规则、最近 20 条审计、[删除]。
+
+**启用开关**：每行一个 switch，直接切换、不等确认。已连接时置灰（先断开）。
+禁用行整体降低对比度并标注「已禁用」，**仍留在列表里**——模型看不见它（§5.1），
+用户必须看得见，否则没有入口恢复。测试按钮在禁用行上同样置灰（连不上，测也没意义）。
 
 ### 8.3 待确认区（危险操作两段式）
 
@@ -579,7 +595,7 @@ hostVerifier: (keyHash, callback) => {
 |---|---|
 | `GET /server-connector/servers` | 列表（不含凭据） |
 | `POST /server-connector/servers` | 新增 |
-| `PUT /server-connector/servers/:id` | 更新 |
+| `PUT /server-connector/servers/:id` | 更新（含 `enabled` 开关） |
 | `DELETE /server-connector/servers/:id` | **删除请求 → 入队** |
 | `POST /server-connector/test` | 测试连接（不在 turn 内，不做高危判定） |
 | `POST /server-connector/connect/:id` | 主动建立连接 |
@@ -596,6 +612,17 @@ hostVerifier: (keyHash, callback) => {
 自定义规则的增删改**不走待确认区**：它们只增加或收紧限制，不会放宽既有保护
 （`block → allow` 的降级路径已被 §4.4.2 拒绝）。唯一例外是「停用」，它等价于
 `disabledRules` 的修改，仍走两段式确认。
+
+**启用开关**（`PUT` 的 `enabled` 字段）同样**不走待确认区**：禁用让整台机器不可用，
+是收紧而非放宽。两条约束：
+
+- **已建立连接时拒绝禁用**，返回 `409 SERVER_CONNECTED`。不做静默断开——用户要的是
+  「以后别用这台」，不是「立刻掐掉正在跑的东西」。
+- 每次切换写一条审计事件（`server-enabled` / `server-disabled`）。这是它绕开待确认区
+  后唯一留下的痕迹，不能省。
+
+UI 与 `srv_list` 在此**有意不一致**：`srv_list` 里禁用项消失（模型不该看见），
+但列表页保留该行、置灰并标注「已禁用」（用户必须有入口把它恢复，否则会误以为被删）。
 
 路由与 GUI 同一信任边界（DSH `webServer` 已受连接层鉴权保护）。
 
@@ -730,6 +757,8 @@ plugin_manager install_bundle  target=<abs path to dsh-server-connector>
 | 自定义规则的正则写错 | 写宽会误拦、写窄会漏拦，而用户以为「加了规则就安全了」 | 保存时六道校验（§4.4.2）+ 必中样例试跑（§4.4.3）+ 面板明示「这是遏制不是边界」 |
 | 自定义规则引发 ReDoS | 一条病态正则能卡住该服务器的所有执行 | 拒绝嵌套量词、限制 512 字符；规则数上限 50 条/服务器 |
 | 自定义规则制造虚假安全感 | 用户可能因此放松远端降权 | §4.3 的边界声明在面板与 README 两处重复出现；自定义规则不改变「远端才是硬边界」 |
+| 用户以为禁用等于删除 | 禁用后配置仍在，但可能找不到入口 | 禁用行保留在列表并标注「已禁用」，switch 随时可开 |
+| 系统提示/`srv_list` 泄露禁用项 | 模型会反复尝试一个不可达目标 | 三个出口（resolveServer / srv_list / 系统提示）同时过滤，测试逐个覆盖 |
 
 ---
 
