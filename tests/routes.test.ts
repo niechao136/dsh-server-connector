@@ -320,6 +320,33 @@ describe('POST /servers', () => {
     assert.equal(name.status, 400)
   })
 
+  test('a Windows drive-letter or UNC key path is absolute, and a POSIX one still is', async () => {
+    const { api } = stack()
+    // The key file lives on this machine, so `C:\…` and `\\server\share\…` are
+    // absolute there. The panel used to demand a leading `/`, which made key
+    // auth impossible to submit on Windows.
+    for (const path of ['C:\\Users\\me\\.ssh\\id_ed25519', 'C:/Users/me/.ssh/id_ed25519', '\\\\server\\share\\key']) {
+      const answer = await call(api, 'POST', '/servers', {
+        body: { name: `win-${path.slice(0, 4)}`, host: 'h', username: 'u', auth: { kind: 'key', privateKeyPath: path } },
+      })
+      // 400 here means "the file is not on this machine", not "not absolute":
+      // the path passes shape validation first, which is the regression under test.
+      assert.equal(answer.status, 400)
+      assert.equal(answer.body.error.code, 'INVALID_SERVER')
+      assert.match(String(answer.body.error.message), /does not exist|is not a regular file/)
+    }
+  })
+
+  test('defaultWorkDir stays POSIX, because it names a directory on the remote host', async () => {
+    const { api } = stack()
+    const windowsWorkDir = await call(api, 'POST', '/servers', {
+      body: { name: 'wd', host: 'h', username: 'u', auth: { kind: 'agent' }, defaultWorkDir: 'C:\\app' },
+    })
+    assert.equal(windowsWorkDir.status, 400)
+    assert.equal(windowsWorkDir.body.error.code, 'INVALID_SERVER')
+    assert.match(String(windowsWorkDir.body.error.message), /must be an absolute path/)
+  })
+
   test('creating with hostKeyMode "off" keeps verification on and queues the change', async () => {
     const { api, registry } = stack()
     const answer = await call(api, 'POST', '/servers', {
