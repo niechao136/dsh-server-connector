@@ -665,6 +665,57 @@ describe('execution against an SSH server (§7.2, §7.3)', () => {
     assert.equal(result.stderr, 'short-err\n')
   })
 
+  test('each stream gets its own maxOutputChars budget, in both directions (§5.4)', async () => {
+    // A full stdout must not swallow stderr ...
+    const stdoutFull = await pool.exec(sshd.server(), {
+      command: 'i=0; while [ $i -lt 200 ]; do echo 0123456789; i=$((i+1)); done; echo late-err >&2',
+      maxOutputChars: 100,
+    })
+    assert.equal(stdoutFull.truncated, true)
+    assert.equal(stdoutFull.stdout.length, 100 + TRUNCATED_MARKER.length)
+    assert.equal(stdoutFull.stderr, 'late-err\n')
+
+    // ... and a full stderr must not swallow stdout.
+    const stderrFull = await pool.exec(sshd.server(), {
+      command: 'i=0; while [ $i -lt 200 ]; do echo 0123456789 >&2; i=$((i+1)); done; echo late-out',
+      maxOutputChars: 100,
+    })
+    assert.equal(stderrFull.truncated, true)
+    assert.equal(stderrFull.stdout, 'late-out\n')
+    assert.equal(stderrFull.stderr.length, 100 + TRUNCATED_MARKER.length)
+    assert.ok(stderrFull.stderr.endsWith(TRUNCATED_MARKER))
+  })
+
+  test('both streams truncated get one marker each, not one shared (§5.4)', async () => {
+    const result = await pool.exec(sshd.server(), {
+      command: 'i=0; while [ $i -lt 200 ]; do echo 0123456789; echo 9876543210 >&2; i=$((i+1)); done',
+      maxOutputChars: 100,
+    })
+    assert.equal(result.truncated, true)
+    assert.equal(result.stdout.length, 100 + TRUNCATED_MARKER.length)
+    assert.ok(result.stdout.endsWith(TRUNCATED_MARKER))
+    assert.equal(result.stderr.length, 100 + TRUNCATED_MARKER.length)
+    assert.ok(result.stderr.endsWith(TRUNCATED_MARKER))
+  })
+
+  test('execStream applies the same per-stream budget as exec (§5.4)', async () => {
+    const chunks: { channel: string, text: string }[] = []
+    const result = await pool.execStream(sshd.server(), {
+      command: 'echo short-err >&2; i=0; while [ $i -lt 200 ]; do echo 0123456789; i=$((i+1)); done',
+      maxOutputChars: 100,
+      onChunk: (channel: string, text: string) => chunks.push({ channel, text }),
+    })
+    assert.equal(result.truncated, true)
+    assert.equal(result.stdout.length, 100 + TRUNCATED_MARKER.length)
+    assert.ok(result.stdout.endsWith(TRUNCATED_MARKER))
+    assert.equal(result.stderr, 'short-err\n')
+    // The forwarded chunks obey the same ceiling: stderr still arrives whole
+    // after stdout has already used up its 100 characters.
+    assert.equal(chunks.filter((chunk) => chunk.channel === 'stderr').map((chunk) => chunk.text).join(''), 'short-err\n')
+    assert.equal(chunks.filter((chunk) => chunk.channel === 'stdout').map((chunk) => chunk.text).join('').length, 100)
+    assert.equal(result.cancelled, false)
+  })
+
   test('a per-call timeout overrides the pool default', async () => {
     const result = await pool.exec(sshd.server(), { command: 'sleep 5', timeoutMs: 400 })
     assert.equal(result.timedOut, true)
