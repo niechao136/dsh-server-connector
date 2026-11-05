@@ -132,7 +132,7 @@ class FakeJobs {
       updateProgress: () => {},
     }
     const hooks = spec.run(handle)
-    this.jobs.set(id, { id, spec, hooks, chunks, status: 'running', detail: undefined, total: 0 })
+    this.jobs.set(id, { id, spec, hooks, chunks, status: 'running', detail: undefined, total: 0, owner: spec.owner })
     void hooks.done.then((outcome: any) => {
       const job = this.jobs.get(id)
       if (job === undefined) return
@@ -144,9 +144,23 @@ class FakeJobs {
     return id
   }
 
-  get(id: string) {
+  /**
+   * The real registry fences an *owned* job by session id: a caller that is not
+   * the owner gets "belongs to another session", while an unowned job is visible
+   * to everyone. This double must enforce the same rule, otherwise a tool that
+   * forgets to pass its own `exec` still passes every test.
+   * @param {any} job
+   * @param {any} caller
+   */
+  assertAccess(job: any, caller: any) {
+    if (job.owner === undefined) return
+    if (caller !== job.owner) throw new Error(`job ${job.id} belongs to another session`)
+  }
+
+  get(id: string, caller?: any) {
     const job = this.jobs.get(id)
     if (job === undefined) throw new Error(`unknown job ${id}`)
+    this.assertAccess(job, caller)
     return {
       id: job.id,
       status: job.status,
@@ -155,19 +169,21 @@ class FakeJobs {
     }
   }
 
-  async wait(id: string, _timeoutMs: number) {
+  async wait(id: string, _timeoutMs: number, caller?: any) {
     const job = this.jobs.get(id)
     if (job === undefined) throw new Error(`unknown job ${id}`)
-    if (this.hang) return this.get(id)
+    this.assertAccess(job, caller)
+    if (this.hang) return this.get(id, caller)
     await job.hooks.done
     // Give the settlement microtask a turn so `done` has updated the record.
     await Promise.resolve()
-    return this.get(id)
+    return this.get(id, caller)
   }
 
-  read(id: string) {
+  read(id: string, caller?: any) {
     const job = this.jobs.get(id)
     if (job === undefined) throw new Error(`unknown job ${id}`)
+    this.assertAccess(job, caller)
     // The model's consuming cursor: chunks are handed out once, then dropped.
     const chunks = job.chunks
     job.chunks = []
@@ -175,19 +191,21 @@ class FakeJobs {
       chunks,
       lossy: false,
       ...(job.result === undefined ? {} : { result: job.result }),
-      job: this.get(id),
+      job: this.get(id, caller),
     }
   }
 
-  readAt(id: string) {
+  readAt(id: string, _offset?: number, caller?: any) {
     const job = this.jobs.get(id)
     if (job === undefined) throw new Error(`unknown job ${id}`)
+    this.assertAccess(job, caller)
     return { chunks: job.chunks, next: job.total, lossy: false }
   }
 
-  kill(id: string) {
+  kill(id: string, caller?: any) {
     const job = this.jobs.get(id)
     if (job === undefined) throw new Error(`unknown job ${id}`)
+    this.assertAccess(job, caller)
     if (job.status !== 'running') return 'already-finished'
     job.status = 'stopping'
     job.hooks.cancel('killed by test')
@@ -868,6 +886,42 @@ describe('srv_exec async: ctx.jobs promotion (§5.4)', () => {
     await call(tools.get('srv_job_kill'), { jobId: String(started.jobId) })
     await new Promise((resolve) => setTimeout(resolve, 10))
     assert.deepEqual(cancelReasons, ['channel closed'])
+  })
+
+  test('the session that started a job can read and kill it (§5.4)', async () => {
+    // Regression: srv_job_output / srv_job_kill read the owner off `undefined`
+    // instead of their own `exec`, so every read looked unowned and the real
+    // registry — which fences owned jobs by session — answered "belongs to
+    // another session" even for the session that started the job.
+    const jobs = new FakeJobs()
+    jobs.hang = true
+    const registry = new Registry({ file: serversFile })
+    await registry.create(serverInput())
+    const surface = new ToolSurface({ registry, pool: new FakePool() as any, jobs })
+    const tools = toolsOf(surface)
+    const agent = fakeAgent()
+    const started = await tools
+      .get('srv_exec')
+      .execute({ server: 'srv-01', command: 'sleep 300', async: true }, toolExec(agent))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    // The owner recorded on the job is the calling session, so the same session
+    // must be able to collect it. Reading is the decisive assertion: it is what
+    // used to throw "belongs to another session".
+    const text = await call(tools.get('srv_job_output'), { jobId: String(started.jobId) }, toolExec(agent))
+    assert.doesNotMatch(text, /another session/)
+    // kill() also consults the owner. The fake job here may already be settled
+    // (FakePool resolves immediately), and either outcome is fine — what matters
+    // is that the call is not rejected as foreign.
+    const killed = await call(tools.get('srv_job_kill'), { jobId: String(started.jobId) }, toolExec(agent))
+    assert.match(killed, /cancellation|already finished/)
+
+    // A different session is still fenced out — the fix must not open the job up
+    // to everyone.
+    await assert.rejects(
+      tools.get('srv_job_output').execute({ jobId: String(started.jobId) }, toolExec({ id: 'session-2', session: { id: 'session-2' } })),
+      /belongs to another session|another session/,
+    )
   })
 })
 
