@@ -243,10 +243,10 @@ describe('styles', () => {
     assert.ok(css.length > 1000)
     assert.match(css, /\.srv-page/)
     assert.match(css, /\[data-on="true"\]/)
-    // Hard-coded colors would break dark mode; every color is a token. The two
-    // exceptions are the switch's own chrome, which reproduces the Host's switch
-    // exactly: a white thumb and a 12% black off-track.
-    const allowed = new Set(['#fff', '#0f1115'])
+    // Hard-coded colors would break dark mode; every color is a token. The only
+    // literals left are var() fallbacks, which apply solely when a token is
+    // missing (never in the Host, which defines all of them).
+    const allowed = new Set(['#fff', '#0f1115', '#adb2b8'])
     const colors = (css.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).filter(
       (color: string) => !allowed.has(color.toLowerCase()),
     )
@@ -254,23 +254,28 @@ describe('styles', () => {
     bundle.dispose()
   })
 
-  test('every design token the switch uses is one the Host theme defines', async () => {
-    // Regression: the switch once painted itself with `--dsw-alias-border-l4`
-    // for the off state, which renders as a barely-visible wash and read as a
-    // white block. The Host's own switch uses `--dsw-alias-label-primary` when
-    // on; the off track is a plain 12% black wash. Pinning the token names here
-    // keeps a future edit from reintroducing a token the theme does not paint.
+  test('the switch stays legible in both themes', async () => {
+    // Two regressions are pinned here.
+    //
+    // 1. The off track once used a border token that renders as a barely visible
+    //    wash, so the control read as a white block.
+    // 2. The thumb was hard-coded `#fff`. In dark mode the on-track resolves to
+    //    #f9fafb, so a white thumb on a near-white track disappeared entirely.
+    //
+    // The Host solves this by pairing `--dsw-alias-label-primary` (track) with
+    // `--dsw-alias-label-primary-inverted` (thumb): the two swap together, so
+    // contrast survives either theme.
     const bundle = await loadBundle()
     const { ctx } = recordingContext()
     bundle.exports.apply(ctx)
     const css = bundle.styles[0].textContent
-    // Tokens confirmed present in the desktop theme (412 resolvable at #root).
     const hostTokens = new Set([
       '--dsw-alias-brand-primary',
       '--dsw-alias-button-primary-fill',
       '--dsw-alias-button-primary-hover',
       '--dsw-alias-label-primary',
       '--dsw-alias-label-primary-foreground',
+      '--dsw-alias-label-primary-inverted',
       '--dsw-alias-label-secondary',
       '--dsw-alias-label-tertiary',
       '--dsw-alias-label-caption',
@@ -290,9 +295,12 @@ describe('styles', () => {
     const used = [...css.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1])
     const unknown = used.filter((token) => !hostTokens.has(token))
     assert.deepEqual(unknown, [], `unknown host tokens: ${unknown.join(', ')}`)
-    // The switch must not paint its off state with a border token again.
-    assert.match(css, /\.srv-switch\{[^}]*background:rgba\(0,0,0,\.12\)/)
-    assert.match(css, /\.srv-switch\[data-on="true"\]\{[^}]*--dsw-alias-label-primary/)
+    // On-track uses label-primary; the thumb under the on state must use its
+    // inverted partner rather than a fixed white.
+    assert.match(css, /\.srv-switch\[data-on="true"\]\{[^}]*--dsw-alias-label-primary[,)]/)
+    assert.match(css, /\.srv-switch\[data-on="true"\] \.srv-switch-knob\{[^}]*--dsw-alias-label-primary-inverted/)
+    // Nothing may paint the thumb a literal white, in any state.
+    assert.doesNotMatch(css, /\.srv-switch-knob\{[^}]*background:#fff/)
     bundle.dispose()
   })
 })

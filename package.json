@@ -1,6 +1,6 @@
 {
   "name": "dsh-server-connector",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "DSH plugin: SSH execution for servers configured on this machine, with a built-in high-risk command policy (block / confirm / allow).",
   "type": "module",
   "main": "lib/index.js",
