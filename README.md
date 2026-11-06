@@ -506,7 +506,8 @@ $DSH_HOME/server-connector/
 
 ### 凭据
 
-- 密码交给 DSH 凭据服务（`$DSH_HOME/.credentials.yaml`），`servers.json` 只存引用，如 `server-connector:srv-03:password`；
+- 密码交给 DSH 凭据服务（`$DSH_HOME/.credentials.yaml`），`servers.json` 只存引用，如 `DSH_SERVER_CONNECTOR_SRV_03_PASSWORD`
+  （必须是 POSIX 标识符，不能含冒号或连字符）；
 - 面板只显示「已设置 / 未设置」，不会回显明文；接口也不会返回密钥；
 - 没有凭据服务时，密码认证会报 `NO_CREDENTIAL`，改用私钥认证即可；
 - 私钥认证只记录**路径**，密钥内容由 `ssh2` 自己读，插件不缓存。

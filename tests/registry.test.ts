@@ -336,17 +336,34 @@ describe('validation', () => {
     const created = await registry.create({
       ...VALID_INPUT,
       name: '密码机',
-      auth: { kind: 'password', credentialRef: 'server-connector:srv-02:password' },
+      auth: { kind: 'password', credentialRef: 'DSH_SERVER_CONNECTOR_SRV_02_PASSWORD' },
     })
-    assert.deepEqual(created.auth, { kind: 'password', credentialRef: 'server-connector:srv-02:password' })
+    assert.deepEqual(created.auth, { kind: 'password', credentialRef: 'DSH_SERVER_CONNECTOR_SRV_02_PASSWORD' })
     const text = await readFile(file, 'utf8')
     assert.equal(text.includes('hunter2'), false)
     assert.equal(/"(?:password|passphrase|privateKey)"\s*:/.test(text), false)
   })
 
-  test('password auth without a credentialRef derives the conventional ref from the id', async () => {
+  test('password auth without a credentialRef derives a ref DSH credentials accepts', async () => {
     const created = await registry.create({ ...VALID_INPUT, auth: { kind: 'password' } as never })
-    assert.deepEqual(created.auth, { kind: 'password', credentialRef: `server-connector:${created.id}:password` })
+    const ref = created.auth.kind === 'password' ? created.auth.credentialRef : ''
+    // @deepseek-ai/dsh-credentials refuses anything outside this grammar
+    // (`/^[A-Za-z_][A-Za-z0-9_]*$/`), and the rejection takes the whole Host
+    // down at startup because `credentials` is a required plugin. A colon or a
+    // dash in the ref is therefore not cosmetic — it is a boot crash waiting to
+    // be persisted.
+    assert.match(ref, /^[A-Za-z_][A-Za-z0-9_]*$/, `derived ref ${ref} must be a POSIX identifier`)
+    assert.deepEqual(created.auth, { kind: 'password', credentialRef: ref })
+  })
+
+  test('a credentialRef outside the POSIX identifier grammar is refused', async () => {
+    for (const bad of ['server-connector:srv-01:password', 'has-dash', '1leading-digit', 'has space', '']) {
+      const error = await rejection(
+        registry.create({ ...VALID_INPUT, name: `bad-${bad}`, auth: { kind: 'password', credentialRef: bad } } as never),
+      )
+      assert.equal(error.code, 'INVALID_SERVER', bad)
+      assert.match(error.message, /credentialRef/, bad)
+    }
   })
 })
 
@@ -536,5 +553,103 @@ describe('the enable switch (§3.1, enable-switch spec)', () => {
       registry.update(created.id, { enabled: 'no' }),
       (error: unknown) => /enabled must be a boolean/.test((error as Error).message),
     )
+  })
+})
+
+describe('legacy credential refs (the 0.2.0 startup crash)', () => {
+  /** Write a servers.json whose password auth carries `ref`. */
+  async function seedWithRef(ref: string) {
+    await mkdir(join(directory, 'server-connector'), { recursive: true })
+    const doc = {
+      version: REGISTRY_VERSION,
+      servers: [
+        {
+          ...VALID_INPUT,
+          id: 'srv-01',
+          name: '旧记录',
+          auth: { kind: 'password', credentialRef: ref },
+          createdAt: '2026-01-01T00:00:00.000Z',
+          lastConnectedAt: null,
+        },
+      ],
+    }
+    await writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+  }
+
+  test('the legacy colon-separated ref is migrated to the POSIX form on load', async () => {
+    // 0.2.0 derived `server-connector:<id>:password`. That ref is illegal and,
+    // because it was persisted, it broke the NEXT startup of the whole Host.
+    // Loading must repair it rather than refuse the record.
+    await seedWithRef('server-connector:srv-01:password')
+    const loaded = await registry.get('srv-01')
+    assert.equal(loaded?.auth.kind, 'password')
+    const ref = loaded?.auth.kind === 'password' ? loaded.auth.credentialRef : ''
+    assert.equal(ref, 'DSH_SERVER_CONNECTOR_SRV_01_PASSWORD')
+    assert.match(ref, /^[A-Za-z_][A-Za-z0-9_]*$/)
+  })
+
+  test('a foreign illegal ref is still refused, never silently rewritten', async () => {
+    // Only the exact shape this plugin used to write may be migrated: rewriting
+    // some other ref could point the record at a different secret.
+    await seedWithRef('some-other-tool:srv-01:password')
+    const error = await rejection(registry.list())
+    assert.equal(error.code, 'INVALID_REGISTRY')
+    assert.match(error.message, /POSIX identifier/)
+  })
+
+  test('a legal custom ref survives a load/write round trip unchanged', async () => {
+    await seedWithRef('MY_OWN_KEY_NAME')
+    assert.equal((await registry.get('srv-01'))?.auth.kind, 'password')
+    const updated = await registry.update('srv-01', { name: '改过名' })
+    assert.deepEqual(updated.auth, { kind: 'password', credentialRef: 'MY_OWN_KEY_NAME' })
+  })
+})
+
+describe('legacy ref write-back', () => {
+  test('the migrated ref is persisted, so a file copy no longer carries the illegal value', async () => {
+    await mkdir(join(directory, 'server-connector'), { recursive: true })
+    const doc = {
+      version: REGISTRY_VERSION,
+      servers: [
+        {
+          ...VALID_INPUT,
+          id: 'srv-01',
+          name: '旧记录',
+          auth: { kind: 'password', credentialRef: 'server-connector:srv-01:password' },
+          createdAt: '2026-01-01T00:00:00.000Z',
+          lastConnectedAt: null,
+        },
+      ],
+    }
+    await writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+    // Reading once must leave the fixed ref on disk: an in-memory-only repair
+    // would mean any copy of the file taken later still bricks the next start.
+    await registry.list()
+    const text = await readFile(file, 'utf8')
+    assert.equal(text.includes('server-connector:srv-01:password'), false)
+    assert.equal(text.includes('DSH_SERVER_CONNECTOR_SRV_01_PASSWORD'), true)
+  })
+
+  test('a file whose refs are already legal is not rewritten', async () => {
+    await mkdir(join(directory, 'server-connector'), { recursive: true })
+    const doc = {
+      version: REGISTRY_VERSION,
+      servers: [
+        {
+          ...VALID_INPUT,
+          id: 'srv-01',
+          name: '合法记录',
+          auth: { kind: 'password', credentialRef: 'MY_OWN_KEY' },
+          createdAt: '2026-01-01T00:00:00.000Z',
+          lastConnectedAt: null,
+        },
+      ],
+    }
+    await writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+    const before = (await stat(file)).mtimeMs
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await registry.list()
+    assert.equal((await stat(file)).mtimeMs, before)
+    assert.equal((await readFile(file, 'utf8')).includes('MY_OWN_KEY'), true)
   })
 })

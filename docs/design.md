@@ -113,7 +113,7 @@ DeepSeek Harness（DSH）原生插件，彻底去掉 Docker、SQLite、独立 We
     "port": 22,
     "username": "devops",
     "auth": { "kind": "key", "privateKeyPath": "/root/.ssh/id_rsa" },
-    // 或 { "kind": "password", "credentialRef": "server-connector:srv-01:password" }
+    // 或 { "kind": "password", "credentialRef": "DSH_SERVER_CONNECTOR_SRV_01_PASSWORD" }
     // 或 { "kind": "agent" }
     "hostKeyMode": "accept-new",       // accept-new | verify | off
     "defaultWorkDir": "/srv/app",
@@ -421,7 +421,10 @@ srv_exec(command)
 
 ### 6.3 凭据
 
-- 密码 / passphrase → `ctx.credentials.set(ref, value)`，ref 形如 `server-connector:srv-01:password`。
+- 密码 / passphrase → `ctx.credentials.set(ref, value)`，ref 必须是 **POSIX 标识符**
+  （`/^[A-Za-z_][A-Za-z0-9_]*$/`，与 `@deepseek-ai/dsh-credentials` 的 `REF_PATTERN` 一致），
+  形如 `DSH_SERVER_CONNECTOR_SRV_01_PASSWORD`。**不能含冒号或连字符**：
+  凭据加载时会拒绝非法 ref，而 `credentials` 是必需插件，这会让整个 DSH 启动失败。
 - `servers.json` 只存 `credentialRef`，**永不存明文**。
 - 表单提交密码 → HTTP 路由 → `credentials.set`；回显只显示「已设置/未设置」。
 - 私钥路径存 `servers.json`（路径非秘密），密钥内容由 `ssh2` 自行读文件。
