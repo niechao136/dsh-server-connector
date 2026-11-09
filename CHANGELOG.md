@@ -1,5 +1,77 @@
 # 更新日志
 
+## 0.3.0 — 2026-11-09
+
+### 修复
+
+- **设置页的「全局设置」无法修改**。九个键此前一个 `.volatile()` 都没有，而 DSH 0.2.2
+  只通过 `volatileForm()` 把插件配置投影成设置表单：一个 volatile 字段都没有时整份
+  schema 投影为 `undefined`，`settings.describe()` 不会列出这个 row，
+  `ctx.configForms.get('dsh-server-connector')` 永远是 `unavailable`。于是那一块只能
+  显示九个只读数字——不是「值来自 profile」，而是**这个 row 从来没被标记成可编辑**。
+
+  现在九键全部 `.volatile()`，设置页用 `ctx.configForms` 渲染真正的表单：改完点保存，
+  `mutate(ops, revision)` 一次性写入，**立即生效、不重启、不断开现有连接**。
+  可编辑表单拿不到时（旧 Host、或该部署没有这个 row）降级为只读视图并明确说明原因，
+  不再渲染一排死掉的输入框。
+
+- **volatile 值必须按 cell 读，否则保存等于没保存**。`.volatile()` 字段解析出来的是
+  cosmokit 的 cell 而不是值，loader 直接**原地改写这个 cell** 并发
+  `loader/volatile-update`，插件不会被重新挂载、`apply()` 不会再执行一次。
+  新增 `lib/config.js` 的 `readConfig()` 作为唯一读取入口（各单元在**用值时**才读），
+  并在 `apply()` 里监听 `loader/volatile-update`，把新值转发给已经持有快照的
+  `Pool.configure()` / `AuditLog.configure()` / `PendingQueue.configure()`。
+  这些 `configure()` 都是原地生效：改超时不会断开连接，关审计不会删掉已有日志，
+  改 TTL 只影响之后入队的记录（已入队的截止时间不变）。
+
+### 变更
+
+- **删除确认改为详情页原地两段式**。此前点「删除」只是入队，然后必须切到设置页找到
+  那条记录再确认；现在详情页点「删除」会在本页展开确认区：显示目标、后果，勾选确认框后
+  「确认删除」才可点。安全模型没变——请求仍然先入队（`DELETE` 只入队返回 202），
+  再调用 `POST /pending/:id/confirm` 才真正删除。设置页的待确认区保留，作为异时确认的
+  第二入口。
+
+- **更新后面板消失，重启才回来 —— 已按 dsh-context 的做法修好本插件这一半**。
+  参照对象不是猜的：同一台机器上 `dsh-context` 更新时面板**先消失后自己回来**，
+  而本插件只能重启。差别只有一处——
+
+  `dsh-context` 每次挂载前先问注册表「我这个 id 是不是已经在位」：
+
+  ```js
+  function alreadyMounted(ctx, slot, id) {
+    const entries = ctx.slots.entries(slot)      // 注册表的读取面
+    return entries.some((entry) => entry.options?.id === id)
+  }
+  // apply() 里
+  if (alreadyMounted(ctx, n_, r_)) return
+  ```
+
+  本插件此前是**盲注册**。而 DSH 的插槽注册表对同一 id、同一优先级会直接抛：
+
+  ```
+  list slot "settings.section" already has an entry with id "server-connector"
+  keyed slot "main" already has an entry for key "server-connector"
+  ```
+
+  （`ui-slots`：list 比 `options.id`，keyed 比 `options.key`。）这个抛错落在
+  `slots.inject` 的回调里，而该注入**一旦抛出就在本 fiber 余生不再重试**——
+  于是新代码挂上、入口却没注册，页面要等进程重启才恢复。这正是「先消失、
+  重启才回来」在本插件侧的那一环。
+
+  现在三个入口都先查在位情况，在位就原样复用、不再注册；`alreadyMounted()` 同时
+  兼容 `entriesOfSlot()` 与 `entries()` 两种读取面，读不到就退回盲注册（旧 Host 仍能工作）。
+  回归测试按真实注册表的重复判定（list 比 id、keyed 比 key、拒绝时抛错）搭了替身，
+  并断言第二次 `apply()` **一次 register 都不发起**。
+
+  保留上一版的兜底：注册真的失败时只丢那一个入口，不会顺带带走整批插件。
+
+### 文档
+
+- README 与 `docs/design.md` 的 §8.2 / §8.3 / §10 更新为上述行为。
+
+---
+
 ## 0.2.3 — 2026-11-06
 
 ### 修复

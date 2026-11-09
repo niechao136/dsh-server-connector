@@ -540,6 +540,30 @@ hostVerifier: (keyHash, callback) => {
 `●` 绿点 = 连接池有活连接；`○` 灰点 = 无。
 点进一行 → 详情页：连接四字段只读、高危策略表、自定义规则、最近 20 条审计、[删除]。
 
+**删除是原地两段式**（0.3.0 起）：点 [删除] 只在本页展开确认区，显示目标与后果，
+勾选确认框后 [确认删除] 才可点；确认时先 `DELETE` 入队、再 `POST /pending/:id/confirm`。
+这一改动只移动了「在哪确认」，没有改变安全模型：`DELETE` 仍然只入队（§8.3），
+一次点击仍然不会删掉任何东西。设置页的待确认区保留，作为异时确认的第二入口。
+
+### 8.2.1 挂载必须幂等（0.3.0）
+
+三个入口注册前都要先问注册表「我这个 id 是否已在位」，在位就复用、不再注册。
+这是 `dsh-context` 的做法（`if (alreadyMounted(ctx, slot, id)) return`），
+也是本插件此前缺少的一环。
+
+原因在两条实测行为，缺一即挂：
+
+1. `ui-slots` 的 `register()` 对同 id、同优先级直接抛
+   （list 比 `options.id`，keyed 比 `options.key`）。更新时上一个注册可能仍在表里，
+   盲注册必然撞上。
+2. `slots.inject` 的回调**抛出一次，该注入在本 fiber 余生不再重试**。
+
+两者叠加 = 新代码挂上了、入口没注册、要重启进程才恢复——即「更新后面板消失」。
+
+读取面用 `entriesOfSlot(name)`，Host 不提供时退回 `entries(name)`，两者都读不到则
+退回盲注册（旧 Host 仍可工作）。仍然保留失败兜底：注册真失败只丢那一个入口，
+不影响同批次其他插件。
+
 **启用开关**：每行一个 switch，直接切换、不等确认。已连接时置灰（先断开）。
 禁用行整体降低对比度并标注「已禁用」，**仍留在列表里**——模型看不见它（§5.1），
 用户必须看得见，否则没有入口恢复。测试按钮在禁用行上同样置灰（连不上，测也没意义）。
@@ -574,8 +598,38 @@ hostVerifier: (keyHash, callback) => {
 - 取消：删记录，服务器保持原状。
 
 **理由**：浏览器 confirm 是「点一下就没了」的瞬时决策，误点不可挽回；
-待确认区把决策延迟到用户回到设置页、看到完整上下文（申请时间、目标、后果）时再做，且中途可取消。
-代价是多一次跳转。
+待确认区把决策延迟到用户看到完整上下文（申请时间、目标、后果）时再做，且中途可取消。
+
+**两个确认入口（0.3.0）**：删除在**详情页原地**确认（确认区显示目标、后果，勾选框未勾选时
+[确认删除] 置灰），其余两类仍在设置页。两条路径打的是同一组接口（`DELETE` 入队 →
+`POST /pending/:id/confirm`），因此安全模型与审计完全一致；设置页始终是全部请求的统一视图。
+
+### 8.3.1 全局设置可编辑（0.3.0）
+
+`settings.section` 的「全局设置」不再是只读展示。链路：
+
+```
+Config（九键全 .volatile())
+  → volatileForm() 投影 → settings.describe() 列出 row
+  → ctx.configForms.get('dsh-server-connector')   （键是 cordis 条目 id）
+  → 表单草稿 → mutate([{op:'set',path:[k],value}], revision)
+  → configEditor 写回 profile YAML → loader 原地改写 volatile cell
+  → 发 loader/volatile-update → apply() 里转发给 Pool/AuditLog/PendingQueue.configure()
+```
+
+关键约束（都是实测出来的，不是推测）：
+
+- **必须 `.volatile()`**：`volatileForm()` 只保留 volatile 字段；一个都没有时整份 schema
+  投影为 `undefined`，该 row 根本不出现在 `describe()` 里——这正是「九个数字只读」的真因。
+- **必须等 row 被 serve**：`configForms.get()` 在 `describe()` 落定之前拿到会永久停在
+  `unavailable`，所以用 `whileServed([id], …)` 而不是立即 `get()`。
+- **必须按 cell 读值**：volatile 字段解析成 cosmokit cell，loader 原地改写它，插件不重挂。
+  任何在构造时快照的值都会永远停在默认值，因此统一走 `lib/config.js` 的 `readConfig()`，
+  并由 `configure()` 把变化推进已经持快照的单元。
+- **拿不到表单就降级**：旧 Host 或缺服务时显示只读视图并说明原因，不渲染死输入框。
+
+**否决的方案**：自持 `settings.json` + 自有路由。代价是九个数出现两处真相源，
+而且仍然拿不到 DSH 设置页的写锁与 revision 冲突保护。
 
 ### 8.4 表单字段
 
@@ -744,6 +798,21 @@ plugin_manager install_bundle  target=<abs path to dsh-server-connector>
 | `auditMaxBytes` | number | 0 | 0 = 不轮转；>0 超限轮转一次 |
 | `pendingTtlHours` | number | 24 | 待确认记录过期时间 |
 | `maxListedServers` | number | 8 | 系统提示里最多列几台服务器 |
+
+**九个键全部 `.volatile()`**（0.3.0）。这不是风格选择：DSH 0.2.2 只把 volatile 字段投影成
+设置表单，一个 volatile 字段都没有时 `volatileForm()` 返回 `undefined`，该 row 不进
+`settings.describe()`，设置页只能做只读展示。
+
+volatile 字段解析成 cosmokit cell 而不是值，loader 原地改写它并发 `loader/volatile-update`
+（插件不重挂）。因此：
+
+- 读取统一走 `lib/config.js` 的 `readConfig()`，且**在用值时读**，不缓存；
+- `apply()` 监听 `loader/volatile-update`，把新值转发给 `Pool.configure()` /
+  `AuditLog.configure()` / `PendingQueue.configure()`；
+- 这三个 `configure()` 都原地生效：改超时不断开连接，关审计不删日志，
+  改 TTL 只影响之后入队的记录。
+
+完整链路与实测约束见 §8.3.1。
 
 ---
 

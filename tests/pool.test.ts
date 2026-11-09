@@ -262,6 +262,17 @@ describe('path helpers and defaults (§7.2, §7.3, §10)', () => {
     assert.throws(() => new Pool({} as never), /knownHosts/)
   })
 
+  test('configure() takes a live settings edit without dropping the pool', () => {
+    // A volatile settings edit must not rebuild the pool — rebuilding would close
+    // every socket and make the user reconnect after changing a timeout.
+    const pool = createPool({ idleTimeoutMs: 600000 } as never)
+    pool.configure({ idleTimeoutMs: 1234, commandTimeoutMs: 5000, connectTimeoutMs: 2000, maxOutputChars: 4096 })
+    assert.equal(pool.idleTimeoutMs, 1234)
+    // Only the values the pool owns are taken; anything else is ignored.
+    pool.configure({ pendingTtlHours: 99 } as never)
+    assert.equal(pool.idleTimeoutMs, 1234)
+  })
+
   test('shellQuote keeps single quotes literal', () => {
     assert.equal(shellQuote('plain'), "'plain'")
     assert.equal(shellQuote("it's"), "'it'\\''s'")

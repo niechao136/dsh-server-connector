@@ -63,6 +63,23 @@ describe('append() and tail()', () => {
     await assert.rejects(readFile(file, 'utf8'))
   })
 
+  test('configure() turns appending off and on without losing the file', async () => {
+    // `auditEnabled` is a live setting: switching it off must stop new lines
+    // without deleting what is already recorded.
+    const log = new AuditLog({ file, enabled: true })
+    await log.append(EXEC_ENTRY)
+    log.configure({ enabled: false })
+    assert.deepEqual(await log.append({ ...EXEC_ENTRY, command: 'ls' }), {
+      written: false,
+      enabled: false,
+      rotated: false,
+    })
+    assert.equal((await log.tail()).length, 1)
+    log.configure({ enabled: true })
+    await log.append({ ...EXEC_ENTRY, command: 'pwd' })
+    assert.equal((await log.tail()).length, 2)
+  })
+
   test('append then tail returns the same record', async () => {
     const log = new AuditLog({ file })
     assert.deepEqual(await log.append(EXEC_ENTRY), { written: true, enabled: true, rotated: false })

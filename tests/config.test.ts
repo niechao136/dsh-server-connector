@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
 
-import { Config, buildAuditLog, buildKnownHosts, buildPool, buildRegistry } from '../lib/index.js'
+import { Config, CONFIG_DEFAULTS, CONFIG_KEYS, buildAuditLog, buildKnownHosts, buildPool, buildRegistry, readConfig, unbox } from '../lib/index.js'
 
 let directory: string
 
@@ -25,7 +25,10 @@ afterEach(async () => {
 
 describe('Config schema (§10)', () => {
   test('every §10 key exists with its documented default', () => {
-    const config = new Config({})
+    // Every field is `.volatile()`, so it resolves to a cosmokit cell rather than
+    // to its value: `readConfig` is the only correct reader (and the only one the
+    // rest of the plugin uses).
+    const config = readConfig(new Config({}))
     assert.equal(config.connectTimeoutMs, 15000)
     assert.equal(config.commandTimeoutMs, 60000)
     assert.equal(config.syncTimeoutMs, 20000)
@@ -35,17 +38,55 @@ describe('Config schema (§10)', () => {
     assert.equal(config.auditMaxBytes, 0)
     assert.equal(config.pendingTtlHours, 24)
     assert.equal(config.maxListedServers, 8)
+    assert.deepEqual(Object.keys(config).sort(), [...CONFIG_KEYS].sort())
+  })
+
+  test('every key is .volatile(), which is what makes the settings form appear', () => {
+    // DSH projects a plugin row into a settings form only through
+    // `volatileForm()`, which keeps a field only when it is marked volatile. A
+    // single non-volatile key would silently shrink the form; a schema with none
+    // would project to `undefined` and hide the whole section, which is exactly
+    // the bug this pins against.
+    const schema = new Config({})
+    for (const key of CONFIG_KEYS) {
+      const value = /** @type {any} */ (schema)[key]
+      assert.equal(typeof value.get, 'function', `${key} is not volatile`)
+      assert.equal(typeof unbox(value), typeof CONFIG_DEFAULTS[key], `${key} has the wrong type`)
+    }
+    assert.deepEqual(readConfig(new Config({})), CONFIG_DEFAULTS)
+  })
+
+  test('a volatile cell is read live, so an in-place write reaches the next reader', () => {
+    // This is the mechanism the settings page relies on: the loader writes the
+    // new value into the same cell object instead of remounting the plugin.
+    const schema = new Config({})
+    const cell = /** @type {any} */ (schema).commandTimeoutMs
+    const write = Reflect.get(cell, Symbol.for('cosmokit.volatile.write'))
+    assert.equal(typeof write, 'function')
+    write(1234)
+    assert.equal(cell.get(), 1234)
+    assert.equal(readConfig(schema).commandTimeoutMs, 1234)
+  })
+
+  test('readConfig tolerates plain values and missing keys', () => {
+    // A test fixture or an older host may hand over a plain object; a value that
+    // was never configured falls back to the documented default.
+    assert.equal(readConfig({ commandTimeoutMs: 42 }).commandTimeoutMs, 42)
+    assert.equal(readConfig({ commandTimeoutMs: 42 }).syncTimeoutMs, CONFIG_DEFAULTS.syncTimeoutMs)
+    assert.deepEqual(readConfig(undefined), CONFIG_DEFAULTS)
+    assert.equal(unbox(7), 7)
+    assert.equal(unbox(undefined), undefined)
   })
 
   test('auditEnabled / auditMaxBytes / pendingTtlHours accept explicit values', () => {
-    const config = new Config({ auditEnabled: false, auditMaxBytes: 4096, pendingTtlHours: 72 })
+    const config = readConfig(new Config({ auditEnabled: false, auditMaxBytes: 4096, pendingTtlHours: 72 }))
     assert.equal(config.auditEnabled, false)
     assert.equal(config.auditMaxBytes, 4096)
     assert.equal(config.pendingTtlHours, 72)
   })
 
   test('auditMaxBytes 0 is valid (rotation disabled) and negative values are rejected', () => {
-    assert.equal(new Config({ auditMaxBytes: 0 }).auditMaxBytes, 0)
+    assert.equal(readConfig(new Config({ auditMaxBytes: 0 })).auditMaxBytes, 0)
     assert.throws(() => new Config({ auditMaxBytes: -1 }))
   })
 

@@ -68,6 +68,23 @@ describe('paths and defaults (§3.3, §3.5, §10)', () => {
     assert.equal(queue({ ttlHours: 48 }).ttlHours, 48)
     assert.throws(() => new PendingQueue({ file, ttlHours: 0 }), /ttlHours/)
   })
+
+  test('configure() applies an edited TTL to the next request only', async () => {
+    // A live settings edit must reach the queue without a remount, and it must not
+    // rewrite the deadline a queued record already promised.
+    const store = queue()
+    const first = await store.request({ kind: 'delete-server', serverId: 'srv-01' })
+    store.configure(2)
+    assert.equal(store.ttlHours, 2)
+    const second = await store.request({ kind: 'disable-hostkey', serverId: 'srv-02' })
+    const lifetime = (record: any) =>
+      Date.parse(record.expiresAt) - Date.parse(record.requestedAt)
+    assert.equal(lifetime(first.record), 24 * 3600 * 1000)
+    assert.equal(lifetime(second.record), 2 * 3600 * 1000)
+    // An invalid value is ignored rather than accepted.
+    store.configure(0)
+    assert.equal(store.ttlHours, 2)
+  })
 })
 
 describe('request(): no side effect, a §3.3 record on disk', () => {

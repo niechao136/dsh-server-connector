@@ -31,6 +31,8 @@ import { describe, test } from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
+import { CONFIG_KEYS } from '../lib/index.js'
+
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** Read and execute the browser bundle exactly as the page would. */
@@ -345,5 +347,161 @@ describe('rendering', () => {
     assert.match(html, /class="srv-page"/)
     assert.match(html, /settings\.pending/)
     assert.match(html, /settings\.global/)
+  })
+
+  test('the settings page renders a read-only global card when it has no form', async () => {
+    // Without an injected `configForms` scope the page cannot save. It must say
+    // so instead of rendering dead inputs. (Outside the slot's `inject` path the
+    // page falls back to a detached model, which is exactly this case.)
+    const { html } = await render('settings.section', { close: () => {} })
+    assert.match(html, /settings\.globalReadonly/)
+    assert.doesNotMatch(html, /<input/)
+  })
+
+  test('deleting from the detail page finishes in place, still through the queue', async () => {
+    // §8.2/§8.3: the confirm step moved from the settings page to the detail
+    // page, but the safety model did not change — `DELETE` only queues, and the
+    // removal happens on `POST /pending/:id/confirm`. This pins both halves so a
+    // later refactor cannot turn "delete" into a single destructive click.
+    const source = await readFile(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
+    const remove = /const remove = async \(server\) => \{([\s\S]*?)\n      \}/.exec(source)
+    assert.ok(remove !== null, 'the detail-page delete flow is missing')
+    const body = remove[1] ?? ''
+    assert.match(body, /method: 'DELETE'/)
+    assert.match(body, /\/pending\/\$\{encodeURIComponent\(id\)\}\/confirm/)
+    // The detail page owns the confirmation state; the plain delete button only
+    // opens it, so one click never reaches the network.
+    assert.match(source, /const \[confirming, setConfirming\] = React\.useState\(false\)/)
+    assert.match(source, /disabled: deleting \|\| !acknowledged/)
+  })
+
+  test('apply() survives a Host that rejects a seat instead of taking the batch down', async () => {    // The client bundle batch is ONE concatenated classic script: an exception that
+    // escapes apply() also skips every later bundle's registration. That is how an
+    // unrelated plugin's update made this panel disappear — the failure was never
+    // ours, but the blast radius was. apply() must therefore never throw.
+    const bundle = await loadBundle()
+    const { ctx } = recordingContext()
+    const thin = {
+      ...ctx,
+      slots: {
+        inject(name: string, contribute: () => void) {
+          // A Host that knows the seat: run it, but let it fail internally.
+          if (name === 'main') {
+            contribute()
+            return () => {}
+          }
+          // A Host that does not know the seat at all.
+          throw new Error(`unknown slot ${name}`)
+        },
+        register() {
+          throw new Error('register refused')
+        },
+      },
+    }
+    assert.doesNotThrow(() => bundle.exports.apply(thin))
+    bundle.dispose()
+  })
+
+  test('a re-applied bundle reuses its seat instead of failing on the duplicate', async () => {
+    // The update path that made the panel "disappear after an update and only
+    // come back after a restart".
+    //
+    // The shipped slot registry refuses a second registration of the same id at
+    // the same priority (`list slot "…" already has an entry with id "…"`), and a
+    // throw inside `slots.inject`'s callback retires that injection for the
+    // fiber's remaining lifetime. So when the new bundle's `apply()` runs while
+    // the previous registration is still in the table — the state an update can
+    // leave behind — a blind `register()` fails, and the seat is then absent for
+    // good instead of being reused.
+    //
+    // dsh-context guards exactly this: `if (alreadyMounted(ctx, slot, id)) return`.
+    // Ours must too, so a re-apply keeps the seat that is already there.
+    const bundle = await loadBundle()
+    const { ctx } = recordingContext()
+    /** Seat table keyed by slot name; entries keep the registry's `{options, component}` shape. */
+    const seats = new Map<string, any[]>()
+    const attempts: string[] = []
+    /** Mirrors the Host's duplicate rules for list and keyed slots. */
+    const strict = {
+      ...ctx,
+      slots: {
+        inject(name: string, contribute: () => void) {
+          contribute()
+          return () => {}
+        },
+        entries(name: string) {
+          return seats.get(name) ?? []
+        },
+        register(options: any, component: any) {
+          attempts.push(options.name)
+          const list = seats.get(options.name) ?? []
+          if (options.name === 'main') {
+            if (list.some((entry) => entry.options.key === options.key)) {
+              throw new Error(`keyed slot "main" already has an entry for key "${options.key}"`)
+            }
+          } else if (list.some((entry) => entry.options.id === options.id)) {
+            throw new Error(`list slot "${options.name}" already has an entry with id "${options.id}"`)
+          }
+          const record = { options, component }
+          list.push(record)
+          seats.set(options.name, list)
+          return () => {
+            seats.set(options.name, list.filter((entry) => entry !== record))
+          }
+        },
+      },
+    }
+    assert.doesNotThrow(() => bundle.exports.apply(strict))
+    attempts.length = 0
+    // A second apply, with the first apply's seats still occupied.
+    assert.doesNotThrow(() => bundle.exports.apply(strict))
+    // It must not even try: a refused register would retire the injection.
+    assert.deepEqual(attempts, [])
+    assert.equal(seats.get('sidebar.panellist')?.length, 1)
+    assert.equal(seats.get('main')?.length, 1)
+    assert.equal(seats.get('settings.section')?.length, 1)
+    bundle.dispose()
+  })
+
+  test('a seat whose registration throws does not take the other seats down', async () => {
+    const bundle = await loadBundle()
+    const { ctx } = recordingContext()
+    const registered: string[] = []
+    const partial = {
+      ...ctx,
+      slots: {
+        inject(name: string, contribute: () => void) {
+          contribute()
+          return () => {}
+        },
+        register(options: any) {
+          // The first seat fails; the other two must still register.
+          if (options.name === 'sidebar.panellist') throw new Error('refused')
+          registered.push(options.name)
+          return () => {}
+        },
+      },
+    }
+    assert.doesNotThrow(() => bundle.exports.apply(partial))
+    assert.deepEqual(registered, ['main', 'settings.section'])
+    bundle.dispose()
+  })
+
+  test('the global settings form covers every Config key exactly once', async () => {
+    // The page's field table is hand-written; `Config` is the authority. A key
+    // added to one and not the other would either hide a setting or show a
+    // control the Host rejects.
+    const bundle = await loadBundle()
+    const { exports } = bundle
+    const { ctx } = recordingContext()
+    exports.apply(ctx)
+    const source = await readFile(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
+    const table = /const CONFIG_FIELDS = \[([\s\S]*?)\n    \]/.exec(source)
+    assert.ok(table !== null, 'CONFIG_FIELDS table is missing')
+    const listed = [...(table[1] ?? '').matchAll(/key: '([A-Za-z0-9]+)'/g)].map((match) => match[1]).sort()
+    const keys = CONFIG_KEYS.slice().sort()
+    assert.deepEqual(listed, keys)
+    assert.equal(new Set(listed).size, listed.length)
+    bundle.dispose()
   })
 })
