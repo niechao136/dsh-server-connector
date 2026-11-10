@@ -10,26 +10,28 @@ README 里引用的界面截图与采集方式。截图是**真实运行**的 DS
 | `settings.png` | 设置 → 服务器连接器：待确认操作 + 全局配置 | 审批与两段式确认 |
 | `install-dialog.png` | 「插件 → 添加插件」对话框 | 安装 |
 
-> 截图采集于 0.2.x。0.3.0 起「全局设置」变为可编辑表单（保存即生效），
-> 删除确认改到详情页原地完成；两张相关截图的界面细节已与当前版本不同，
-> 但入口位置与流程一致。
+> 截图采集于 0.3.0，与当前界面一致：列表每行带启用/禁用开关，详情页含
+> 「自定义规则」卡片，删除在详情页原地确认，「全局设置」是可编辑表单（保存即生效）。
 
 ## 采集环境
 
-- `@deepseek-ai/dsh@0.2.1-rc.5`，插件以 `link:` 方式装进一个独立 profile，
-  该 profile 使用自己的 `$DSH_HOME`（`dsh plugin --profile web add <checkout>`）。
-- Chromium（Playwright 自带的 131.0.6778.33）headless，通过 CDP 驱动：
-  视口宽 1440、device scale 1，`prefers-color-scheme: light`，`locale: zh-CN`；
-  各图高度按内容取 620（列表）/ 1000（安装对话框）/ 760（设置）/ 1080（表单）/ 2150（详情）。
+- `@deepseek-ai/dsh@0.2.2-rc.1`，插件以 `link:` 方式装进一个独立 profile，
+  该 profile 使用自己的 `$DSH_HOME`（`dsh plugin --profile add <checkout>`）。
+- Chromium（Playwright 自带的 Chrome for Testing 158.0.8127.18）headless：
+  视口宽 1440、device scale 1，`colorScheme: light`，`locale: zh-CN`；
+  各图高度按内容取 620（列表）/ 1000（安装对话框）/ 1250（设置）/ 1880（表单）/ 2000（详情）。
 - 三台示例服务器（`本地演示机` / `生产机-A` / `测试机-B`）经由插件自己的
   `POST /server-connector/servers` 路由创建——与面板表单调用的是同一个接口。
+- 设置页本身有固定高度，采集时只放宽对话框高度（`.VOzbGW_panel{height:auto}`），
+  不改变插件渲染出来的任何内容。
 
 ## 演示数据是真的执行出来的
 
 `detail.png` 里的 4 条审计来自一次真实会话：插件在本机起了
-`linuxserver/openssh-server` 容器，用 `srv_connect` / `srv_exec` 依次跑了
-`df -h /`、`df -h /srv/app`、`ls -l /srv/app`，最后一条是被策略拦下的
-`rm -rf /srv/app/old`（`decision: "block"`，命令没有发到远端）。
+`linuxserver/openssh-server` 容器（`127.0.0.1:2222`，公钥认证，`devops`），
+经由插件自己的 `Pool` + `policy.check` 依次跑了
+`df -h /`、`df -h /config`、`ls -l /config`，最后一条是被策略拦下的
+`rm -rf /config/old`（`decision: "block"`，`policyRule: "rm-recursive"`，命令没有发到远端）。
 **`settings.png` 里的待确认记录**也是真的：对 `测试机-B` 调用了一次
 `DELETE /server-connector/servers/srv-03`，服务器仍在列表里，只是多了一条待确认请求。
 
