@@ -528,6 +528,84 @@ describe('srv_policy_check: judge without executing (§5.1)', () => {
   })
 })
 
+// A custom rule is part of the same sweep (§4.2.5), so it has to reach the two
+// places a decision is actually made. `check()` reads `customRules` off the
+// *record*; passing only `(policy, disabledRules)` silently drops them, which
+// makes a saved rule look active in the panel while srv_exec allows the command.
+describe('custom rules reach the execution gates (§4.2.5, §4.4.4)', () => {
+  /** A custom rule that the built-in catalog has no opinion about. */
+  const customRule = (overrides: Record<string, unknown> = {}) => ({
+    id: 'custom-1',
+    label: '删 Docker 卷',
+    pattern: String.raw`docker\s+compose\s+down\s+-v`,
+    defaultDecision: 'block',
+    description: 'down -v 会删除命名卷。',
+    ...overrides,
+  })
+
+  test('srv_policy_check applies the server\'s custom rule', async () => {
+    const { surface, registry, server } = await fixture()
+    await registry.update(server.id, { customRules: [customRule()] })
+    const text = await call(toolsOf(surface).get('srv_policy_check'), {
+      server: 'srv-01',
+      command: 'docker compose down -v',
+    })
+    assert.match(text, /BLOCK on srv-01/)
+    assert.match(text, /custom-1/)
+    assert.match(text, /删 Docker 卷/)
+  })
+
+  test('a custom block rule stops srv_exec before it connects', async () => {
+    const { surface, registry, server, pool } = await fixture()
+    await registry.update(server.id, { customRules: [customRule()] })
+    await assert.rejects(
+      call(toolsOf(surface).get('srv_exec'), { server: 'srv-01', command: 'docker compose down -v' }),
+      (error: unknown) => {
+        assert.ok(error instanceof ToolError)
+        assert.equal(error.code, 'POLICY_BLOCKED')
+        assert.match(error.message, /custom-1/)
+        assert.match(error.message, /删 Docker 卷/)
+        return true
+      },
+    )
+    assert.deepEqual(pool.connects, [])
+    assert.deepEqual(pool.execs, [])
+  })
+
+  test('a custom confirm rule routes srv_exec through the approval gate', async () => {
+    const { surface, registry, server, pool, approval } = await fixture()
+    await registry.update(server.id, { customRules: [customRule({ defaultDecision: 'confirm' })] })
+    await call(
+      toolsOf(surface).get('srv_exec'),
+      { server: 'srv-01', command: 'docker compose down -v' },
+      toolExec(fakeAgent()),
+    )
+    assert.equal(approval.requests.length, 1)
+    assert.match(approval.requests[0].reason, /custom-1/)
+    assert.equal(pool.execs.length, 1)
+  })
+
+  test('a custom rule is per server: another server still allows the command', async () => {
+    const { surface, registry } = await fixture()
+    const other = await registry.create(serverInput({ name: '测试机-B', host: '10.0.0.6' }))
+    await registry.update(other.id, { customRules: [customRule()] })
+    const tools = toolsOf(surface)
+    assert.match(await call(tools.get('srv_policy_check'), { server: 'srv-01', command: 'docker compose down -v' }), /ALLOW/)
+    assert.match(await call(tools.get('srv_policy_check'), { server: 'srv-02', command: 'docker compose down -v' }), /BLOCK/)
+  })
+
+  test('disabling a custom rule brings the command back to allow', async () => {
+    const { surface, registry, server } = await fixture()
+    await registry.update(server.id, { customRules: [customRule()] })
+    await registry.update(server.id, { disabledRules: ['custom-1'] })
+    const text = await call(toolsOf(surface).get('srv_policy_check'), {
+      server: 'srv-01',
+      command: 'docker compose down -v',
+    })
+    assert.match(text, /ALLOW on srv-01/)
+  })
+})
+
 describe('srv_exec gate ①: block never connects or executes (§6.1)', () => {
   test('a blocked command throws POLICY_BLOCKED and the pool is untouched', async () => {
     const { surface, pool } = await fixture()
